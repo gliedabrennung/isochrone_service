@@ -79,7 +79,7 @@ cut_extract() {
   log "cutting bbox $BBOX from source"
   find "$CUSTOM_FILES" -maxdepth 1 -name '*.pbf' ! -name "$(basename "$EXTRACT")" -delete
   osmium extract --bbox "$BBOX" --strategy complete_ways --overwrite \
-    --output "${EXTRACT}.part" "$SOURCE"
+    --output-format pbf --output "${EXTRACT}.part" "$SOURCE"
   mv "${EXTRACT}.part" "$EXTRACT"
   log "extract ready: $(du -h "$EXTRACT" | cut -f1)"
 }
