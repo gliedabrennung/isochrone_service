@@ -1,0 +1,1089 @@
+openapi: 3.1.0
+info:
+  title: isochrone-service
+  summary: API расчёта зон досягаемости на OpenStreetMap и Valhalla
+  description: "\nСервис расчёта зон досягаемости (изохрон) на открытых данных OpenStreetMap\nи открытом\
+    \ роутинг-движке Valhalla.\n\n**Что делает.** По координатам точки старта, способу передвижения и\
+    \ одному или\nнескольким временным порогам строит полигоны достижимости и возвращает их в виде\nGeoJSON\
+    \ FeatureCollection.\n\n**Особенности контракта**\n\n* Ответ соответствует RFC 7946: порядок координат\
+    \ `[lon, lat]`, точность 6 знаков.\n* `metadata` — foreign member верхнего уровня; ключевые поля продублированы\n\
+    \  в `properties` каждого `Feature` для совместимости с ГИС-редакторами.\n* Ошибки соответствуют RFC\
+    \ 7807 (`application/problem+json`).\n* Каждый ответ содержит заголовок `X-Request-Id`, успешный ответ\
+    \ — ещё и `X-Cache`.\n"
+  license:
+    name: ODbL for OSM data, see README
+  version: 1.0.0
+paths:
+  /api/v1/isochrone:
+    post:
+      tags:
+      - isochrone
+      summary: Рассчитать изохроны для точки
+      description: 'Строит зоны досягаемости для одной точки старта и одного или нескольких временных
+        порогов за один вызов движка. Возвращает GeoJSON FeatureCollection: один Feature на каждый порог,
+        в порядке от наибольшего времени к наименьшему.
+
+
+        Пост-обработка: починка геометрии, вырезание водоёмов, опциональные кольца, геодезический расчёт
+        площади и периметра.'
+      operationId: post_isochrone_api_v1_isochrone_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IsochroneRequest'
+      responses:
+        '200':
+          description: 'GeoJSON FeatureCollection: один Feature на каждый временной порог, от большего
+            времени к меньшему. Заголовок X-Cache содержит HIT либо MISS.'
+          content:
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/IsochroneFeatureCollection'
+        '400':
+          description: 'VALIDATION_ERROR или MALFORMED_JSON: нарушены правила валидации запроса.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '422':
+          description: 'POINT_OUT_OF_COVERAGE, POINT_NOT_ROUTABLE или EMPTY_RESULT: запрос корректен,
+            но расчёт для этой точки невозможен.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '429':
+          description: 'RATE_LIMIT_EXCEEDED: превышен лимит запросов на IP, см. заголовок Retry-After.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '500':
+          description: 'INTERNAL_ERROR: необработанное исключение, подробности — в логах по request_id.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '503':
+          description: 'ENGINE_UNAVAILABLE: движок недоступен или не завершил сборку тайлов.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '504':
+          description: 'ENGINE_TIMEOUT: движок не уложился в ENGINE_TIMEOUT_S.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+    get:
+      tags:
+      - isochrone
+      summary: Рассчитать изохроны (query-вариант)
+      description: Функционально эквивалентен POST /isochrone, параметры передаются в query-строке. Предназначен
+        для отладки и шаринга ссылок.
+      operationId: get_isochrone_api_v1_isochrone_get
+      parameters:
+      - name: lat
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Широта точки старта, WGS84.
+          examples:
+          - 43.238949
+          title: Lat
+        description: Широта точки старта, WGS84.
+      - name: lon
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Долгота точки старта, WGS84.
+          examples:
+          - 76.889709
+          title: Lon
+        description: Долгота точки старта, WGS84.
+      - name: contours
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^\d{1,3}(,\d{1,3})*$
+          description: Временные пороги в минутах через запятую, например 10,20,30.
+          examples:
+          - 10,20,30
+          title: Contours
+        description: Временные пороги в минутах через запятую, например 10,20,30.
+      - name: mode
+        in: query
+        required: false
+        schema:
+          type: string
+          description: 'Способ передвижения: pedestrian | bicycle | auto.'
+          examples:
+          - pedestrian
+          default: pedestrian
+          title: Mode
+        description: 'Способ передвижения: pedestrian | bicycle | auto.'
+      - name: rings
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          description: Возвращать контуры как кольца.
+          title: Rings
+        description: Возвращать контуры как кольца.
+      - name: exclude_water
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          description: Вырезать водные объекты.
+          title: Exclude Water
+        description: Вырезать водные объекты.
+      - name: denoise
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: number
+          - type: 'null'
+          description: Параметр denoise движка, 0.0…1.0.
+          title: Denoise
+        description: Параметр denoise движка, 0.0…1.0.
+      - name: generalize
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: Параметр generalize движка, 0…500 м.
+          title: Generalize
+        description: Параметр generalize движка, 0…500 м.
+      - name: departure_time
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            pattern: ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$
+          - type: 'null'
+          description: Время отправления, YYYY-MM-DDTHH:MM (резервный параметр).
+          title: Departure Time
+        description: Время отправления, YYYY-MM-DDTHH:MM (резервный параметр).
+      responses:
+        '200':
+          description: 'GeoJSON FeatureCollection: один Feature на каждый временной порог, от большего
+            времени к меньшему. Заголовок X-Cache содержит HIT либо MISS.'
+          content:
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/IsochroneFeatureCollection'
+        '400':
+          description: 'VALIDATION_ERROR или MALFORMED_JSON: нарушены правила валидации запроса.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '422':
+          description: 'POINT_OUT_OF_COVERAGE, POINT_NOT_ROUTABLE или EMPTY_RESULT: запрос корректен,
+            но расчёт для этой точки невозможен.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '429':
+          description: 'RATE_LIMIT_EXCEEDED: превышен лимит запросов на IP, см. заголовок Retry-After.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '500':
+          description: 'INTERNAL_ERROR: необработанное исключение, подробности — в логах по request_id.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '503':
+          description: 'ENGINE_UNAVAILABLE: движок недоступен или не завершил сборку тайлов.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '504':
+          description: 'ENGINE_TIMEOUT: движок не уложился в ENGINE_TIMEOUT_S.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+  /api/v1/health:
+    get:
+      tags:
+      - system
+      summary: Liveness
+      description: Проверка живости процесса. К зависимостям не обращается.
+      operationId: health_api_v1_health_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/ready:
+    get:
+      tags:
+      - system
+      summary: Readiness
+      description: 'Проверка готовности обслуживать запросы. Обращается к Valhalla, Redis и слою воды.
+
+
+        Ответ 503 возвращается только при недоступности движка: без него расчёт невозможен. Недоступность
+        Redis или слоя воды переводит сервис в состояние degraded, но не приводит к отказу (см. п. 10.3
+        ТЗ).'
+      operationId: ready_api_v1_ready_get
+      responses:
+        '200':
+          description: Сервис готов (status = ok или degraded).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: Движок недоступен, status = unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+  /api/v1/meta:
+    get:
+      tags:
+      - system
+      summary: Покрытие, версия данных и лимиты
+      description: Описание покрытия (bbox и его GeoJSON-границы), даты среза данных OSM, версии движка,
+        доступных режимов передвижения, действующих лимитов и значений по умолчанию.
+      operationId: meta_api_v1_meta_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetaResponse'
+  /metrics:
+    get:
+      tags:
+      - system
+      summary: Метрики Prometheus
+      description: Экспорт метрик сервиса в формате Prometheus text exposition.
+      operationId: metrics_metrics_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            text/plain:
+              schema:
+                type: string
+components:
+  schemas:
+    CacheState:
+      type: string
+      enum:
+      - hit
+      - miss
+      title: CacheState
+    ComponentHealth:
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+          - degraded
+          - unavailable
+          title: Status
+          description: Состояние компонента.
+          examples:
+          - ok
+        detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Detail
+          description: Пояснение при отклонении от нормы.
+        latency_ms:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Latency Ms
+          description: Время ответа компонента, мс.
+      type: object
+      required:
+      - status
+      title: ComponentHealth
+      example:
+        latency_ms: 4.1
+        status: ok
+    Coordinate:
+      properties:
+        lat:
+          type: number
+          title: Lat
+          description: Широта, WGS84
+          examples:
+          - 43.238949
+        lon:
+          type: number
+          title: Lon
+          description: Долгота, WGS84
+          examples:
+          - 76.889709
+      type: object
+      required:
+      - lat
+      - lon
+      title: Coordinate
+      example:
+        lat: 43.238949
+        lon: 76.889709
+    HealthResponse:
+      properties:
+        status:
+          type: string
+          const: ok
+          title: Status
+          description: Признак живости процесса.
+          examples:
+          - ok
+        version:
+          type: string
+          title: Version
+          description: Версия сервиса.
+          examples:
+          - 1.0.0
+      type: object
+      required:
+      - status
+      - version
+      title: HealthResponse
+      example:
+        status: ok
+        version: 1.0.0
+    IsochroneFeature:
+      properties:
+        type:
+          type: string
+          const: Feature
+          title: Type
+          description: Тип объекта GeoJSON.
+          default: Feature
+        geometry:
+          additionalProperties: true
+          type: object
+          title: Geometry
+          description: 'Геометрия RFC 7946: Polygon либо MultiPolygon. Порядок координат [lon, lat], точность
+            6 знаков после запятой.'
+        properties:
+          $ref: '#/components/schemas/IsochroneFeatureProperties'
+          description: Атрибуты контура.
+      type: object
+      required:
+      - geometry
+      - properties
+      title: IsochroneFeature
+      example:
+        geometry:
+          coordinates:
+          - - - 76.85
+              - 43.22
+            - - 76.92
+              - 43.22
+            - - 76.92
+              - 43.26
+            - - 76.85
+              - 43.26
+            - - 76.85
+              - 43.22
+          type: Polygon
+        properties:
+          contour_minutes: 30
+          mode: pedestrian
+        type: Feature
+    IsochroneFeatureCollection:
+      properties:
+        type:
+          type: string
+          const: FeatureCollection
+          title: Type
+          description: Тип коллекции GeoJSON.
+          default: FeatureCollection
+        features:
+          items:
+            $ref: '#/components/schemas/IsochroneFeature'
+          type: array
+          title: Features
+          description: По одному Feature на каждый временной порог, от большего времени к меньшему.
+        metadata:
+          $ref: '#/components/schemas/IsochroneMetadata'
+          description: Foreign member верхнего уровня по RFC 7946. Клиенты, не знающие о нём, обязаны
+            его игнорировать; ключевые поля продублированы в properties каждого Feature.
+      type: object
+      required:
+      - features
+      - metadata
+      title: IsochroneFeatureCollection
+      example:
+        features:
+        - geometry:
+            coordinates:
+            - - - 76.85
+                - 43.22
+            type: Polygon
+          properties:
+            contour_minutes: 30
+            area_km2: 18.42
+          type: Feature
+        metadata:
+          cache: miss
+          request_id: 01J9X2K7Q4T8Z0ABCDEFGHJKMN
+        type: FeatureCollection
+    IsochroneFeatureProperties:
+      properties:
+        contour_minutes:
+          type: integer
+          title: Contour Minutes
+          description: Временной порог контура в минутах.
+          examples:
+          - 30
+        mode:
+          $ref: '#/components/schemas/TravelMode'
+          description: Способ передвижения.
+          examples:
+          - pedestrian
+        color:
+          type: string
+          title: Color
+          description: Цвет контура из фиксированной палитры ColorBrewer.
+          examples:
+          - '#2b83ba'
+        fill_opacity:
+          type: number
+          title: Fill Opacity
+          description: Рекомендуемая прозрачность заливки.
+          examples:
+          - 0.25
+        area_km2:
+          type: number
+          title: Area Km2
+          description: Площадь контура в км², геодезический расчёт.
+          examples:
+          - 18.42
+        perimeter_km:
+          type: number
+          title: Perimeter Km
+          description: Периметр контура в км.
+          examples:
+          - 27.9
+        rings:
+          type: boolean
+          title: Rings
+          description: Признак режима колец.
+          examples:
+          - false
+        engine:
+          type: string
+          title: Engine
+          description: Роутинг-движок.
+          examples:
+          - valhalla
+        engine_version:
+          type: string
+          title: Engine Version
+          description: Версия движка.
+          examples:
+          - 3.5.1
+        osm_data_timestamp:
+          type: string
+          title: Osm Data Timestamp
+          description: Дата среза данных OSM.
+          examples:
+          - '2026-05-01T00:00:00Z'
+        computed_at:
+          type: string
+          title: Computed At
+          description: Момент расчёта, ISO 8601 с таймзоной.
+          examples:
+          - '2026-08-09T10:15:32+06:00'
+        request_id:
+          type: string
+          title: Request Id
+          description: Идентификатор запроса.
+          examples:
+          - 01J9X2K7Q4T8Z0ABCDEFGHJKMN
+        cache:
+          $ref: '#/components/schemas/CacheState'
+          description: Признак попадания в кэш.
+          examples:
+          - miss
+      type: object
+      required:
+      - contour_minutes
+      - mode
+      - color
+      - fill_opacity
+      - area_km2
+      - perimeter_km
+      - rings
+      - engine
+      - engine_version
+      - osm_data_timestamp
+      - computed_at
+      - request_id
+      - cache
+      title: IsochroneFeatureProperties
+      example:
+        area_km2: 18.42
+        cache: miss
+        color: '#2b83ba'
+        computed_at: '2026-08-09T10:15:32+06:00'
+        contour_minutes: 30
+        engine: valhalla
+        engine_version: 3.5.1
+        fill_opacity: 0.25
+        mode: pedestrian
+        osm_data_timestamp: '2026-05-01T00:00:00Z'
+        perimeter_km: 27.9
+        request_id: 01J9X2K7Q4T8Z0ABCDEFGHJKMN
+        rings: false
+    IsochroneMetadata:
+      properties:
+        request_id:
+          type: string
+          title: Request Id
+          description: Идентификатор запроса, дублируется в заголовке X-Request-Id.
+        origin:
+          $ref: '#/components/schemas/Coordinate'
+          description: Координаты, переданные в запросе.
+        snapped_origin:
+          anyOf:
+          - $ref: '#/components/schemas/Coordinate'
+          - type: 'null'
+          description: Точка дорожного графа, к которой движок привязал origin.
+        snap_distance_m:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Snap Distance M
+          description: Расстояние привязки к графу в метрах.
+          examples:
+          - 12.4
+        mode:
+          $ref: '#/components/schemas/TravelMode'
+          description: Способ передвижения.
+        contours:
+          items:
+            type: integer
+          type: array
+          title: Contours
+          description: Запрошенные контуры, отсортированы по возрастанию.
+        rings:
+          type: boolean
+          title: Rings
+          description: Признак режима колец.
+        exclude_water:
+          type: boolean
+          title: Exclude Water
+          description: Признак вырезания воды.
+        denoise:
+          type: number
+          title: Denoise
+          description: Фактически применённое значение denoise.
+        generalize:
+          type: integer
+          title: Generalize
+          description: Фактически применённое значение generalize, м.
+        engine:
+          type: string
+          title: Engine
+          description: Роутинг-движок.
+          examples:
+          - valhalla
+        engine_version:
+          type: string
+          title: Engine Version
+          description: Версия движка.
+          examples:
+          - 3.5.1
+        osm_data_timestamp:
+          type: string
+          title: Osm Data Timestamp
+          description: Дата среза данных OSM.
+        data_version:
+          type: string
+          title: Data Version
+          description: Версия набора данных, входит в ключ кэша.
+        computed_at:
+          type: string
+          title: Computed At
+          description: Момент расчёта, ISO 8601 с таймзоной.
+        duration_ms:
+          type: integer
+          title: Duration Ms
+          description: Полное время обработки запроса сервисом, мс.
+          examples:
+          - 812
+        engine_ms:
+          type: integer
+          title: Engine Ms
+          description: Время ответа роутинг-движка, мс.
+          examples:
+          - 690
+        cache:
+          $ref: '#/components/schemas/CacheState'
+          description: Признак попадания в кэш.
+      type: object
+      required:
+      - request_id
+      - origin
+      - mode
+      - contours
+      - rings
+      - exclude_water
+      - denoise
+      - generalize
+      - engine
+      - engine_version
+      - osm_data_timestamp
+      - data_version
+      - computed_at
+      - duration_ms
+      - engine_ms
+      - cache
+      title: IsochroneMetadata
+      example:
+        cache: miss
+        computed_at: '2026-08-09T10:15:32+06:00'
+        contours:
+        - 10
+        - 20
+        - 30
+        data_version: b0f3c1a9
+        denoise: 0.2
+        duration_ms: 812
+        engine: valhalla
+        engine_ms: 690
+        engine_version: 3.5.1
+        exclude_water: true
+        generalize: 100
+        mode: pedestrian
+        origin:
+          lat: 43.238949
+          lon: 76.889709
+        osm_data_timestamp: '2026-05-01T00:00:00Z'
+        request_id: 01J9X2K7Q4T8Z0ABCDEFGHJKMN
+        rings: false
+        snap_distance_m: 12.4
+        snapped_origin:
+          lat: 43.23891
+          lon: 76.889602
+    IsochroneOptions:
+      properties:
+        denoise:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Denoise
+          description: Подавление мелких изолированных фрагментов изохроны. Пусто — значение по умолчанию
+            подбирается по максимальному контуру (см. README, п. 6.6 ТЗ).
+          examples:
+          - 0.2
+        generalize:
+          anyOf:
+          - type: integer
+            maximum: 500.0
+            minimum: 0.0
+          - type: 'null'
+          title: Generalize
+          description: Допуск упрощения контура в метрах (алгоритм Дугласа — Пекера). Пусто — значение
+            по умолчанию подбирается по максимальному контуру.
+          examples:
+          - 100
+        rings:
+          type: boolean
+          title: Rings
+          description: 'Возвращать контуры как непересекающиеся кольца: из большего контура вырезается
+            меньший. Нужно для корректной заливки без наложения прозрачностей.'
+          default: false
+          examples:
+          - false
+        exclude_water:
+          type: boolean
+          title: Exclude Water
+          description: Вырезать из полигонов площадные водоёмы и буферизованные водотоки.
+          default: true
+          examples:
+          - true
+        departure_time:
+          anyOf:
+          - type: string
+            pattern: ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$
+          - type: 'null'
+          title: Departure Time
+          description: 'Время отправления в локальном времени региона, формат YYYY-MM-DDTHH:MM. Резервный
+            параметр (FR-21): передаётся в движок как date_time.type=1. Пробки и исторические скорости
+            в текущей версии не учитываются.'
+          examples:
+          - 2026-08-09T09:30
+      additionalProperties: false
+      type: object
+      title: IsochroneOptions
+      example:
+        denoise: 0.2
+        exclude_water: true
+        generalize: 100
+        rings: false
+    IsochroneRequest:
+      properties:
+        lat:
+          type: number
+          maximum: 90.0
+          minimum: -90.0
+          title: Lat
+          description: Широта точки старта в WGS84. Должна попадать в bbox покрытия данных.
+          examples:
+          - 43.238949
+        lon:
+          type: number
+          maximum: 180.0
+          minimum: -180.0
+          title: Lon
+          description: Долгота точки старта в WGS84. Должна попадать в bbox покрытия данных.
+          examples:
+          - 76.889709
+        contours:
+          items:
+            type: integer
+            maximum: 60.0
+            minimum: 5.0
+            description: Временной порог контура в минутах, 5…60
+          type: array
+          maxItems: 4
+          minItems: 1
+          title: Contours
+          description: 'Временные пороги в минутах: от 1 до 4 значений, каждое в диапазоне 5…60, без дубликатов.
+            Сервер сортирует список по возрастанию.'
+          examples:
+          - - 10
+            - 20
+            - 30
+        mode:
+          $ref: '#/components/schemas/TravelMode'
+          description: 'Способ передвижения: pedestrian — пешком, bicycle — велосипед, auto — автомобиль.'
+          examples:
+          - pedestrian
+        options:
+          $ref: '#/components/schemas/IsochroneOptions'
+          description: Параметры геометрии и пост-обработки.
+      additionalProperties: false
+      type: object
+      required:
+      - lat
+      - lon
+      - contours
+      - mode
+      title: IsochroneRequest
+      example:
+        contours:
+        - 10
+        - 20
+        - 30
+        lat: 43.238949
+        lon: 76.889709
+        mode: pedestrian
+        options:
+          denoise: 0.2
+          exclude_water: true
+          generalize: 100
+          rings: false
+    MetaCoverage:
+      properties:
+        profile:
+          type: string
+          title: Profile
+          description: Профиль покрытия данных.
+          examples:
+          - almaty
+        bbox:
+          items:
+            type: number
+          type: array
+          title: Bbox
+          description: Границы покрытия в порядке [west, south, east, north].
+          examples:
+          - - 76.6
+            - 43.05
+            - 77.2
+            - 43.45
+        geometry:
+          additionalProperties: true
+          type: object
+          title: Geometry
+          description: Границы покрытия как GeoJSON Polygon.
+      type: object
+      required:
+      - profile
+      - bbox
+      - geometry
+      title: MetaCoverage
+    MetaLimits:
+      properties:
+        max_contours:
+          type: integer
+          title: Max Contours
+          description: Максимум контуров в одном запросе.
+          examples:
+          - 4
+        min_contour_minutes:
+          type: integer
+          title: Min Contour Minutes
+          description: Нижняя граница времени контура.
+          examples:
+          - 5
+        max_contour_minutes:
+          type: integer
+          title: Max Contour Minutes
+          description: Верхняя граница времени контура.
+          examples:
+          - 60
+        max_snap_distance_m:
+          type: number
+          title: Max Snap Distance M
+          description: Максимальная дистанция привязки к дорожному графу.
+          examples:
+          - 500
+        max_body_size:
+          type: integer
+          title: Max Body Size
+          description: Максимальный размер тела запроса, байт.
+          examples:
+          - 16384
+        rate_limit:
+          type: string
+          title: Rate Limit
+          description: Лимит запросов на IP.
+          examples:
+          - 10/second
+        engine_timeout_s:
+          type: number
+          title: Engine Timeout S
+          description: Таймаут обращения к движку, с.
+          examples:
+          - 10
+      type: object
+      required:
+      - max_contours
+      - min_contour_minutes
+      - max_contour_minutes
+      - max_snap_distance_m
+      - max_body_size
+      - rate_limit
+      - engine_timeout_s
+      title: MetaLimits
+    MetaResponse:
+      properties:
+        service:
+          type: string
+          title: Service
+          description: Имя сервиса.
+          examples:
+          - isochrone-service
+        version:
+          type: string
+          title: Version
+          description: Версия сервиса.
+          examples:
+          - 1.0.0
+        engine:
+          type: string
+          title: Engine
+          description: Роутинг-движок.
+          examples:
+          - valhalla
+        engine_version:
+          type: string
+          title: Engine Version
+          description: Версия движка либо unknown, если он недоступен.
+        modes:
+          items:
+            $ref: '#/components/schemas/TravelMode'
+          type: array
+          title: Modes
+          description: Поддерживаемые способы передвижения.
+        osm_data_timestamp:
+          type: string
+          title: Osm Data Timestamp
+          description: Дата среза данных OSM.
+        data_version:
+          type: string
+          title: Data Version
+          description: Версия набора данных.
+        coverage:
+          $ref: '#/components/schemas/MetaCoverage'
+          description: Покрытие данных.
+        limits:
+          $ref: '#/components/schemas/MetaLimits'
+          description: Действующие лимиты.
+        defaults:
+          additionalProperties: true
+          type: object
+          title: Defaults
+          description: Значения параметров по умолчанию.
+        water_parts:
+          type: integer
+          title: Water Parts
+          description: Число полигонов в слое воды.
+          examples:
+          - 1421
+      type: object
+      required:
+      - service
+      - version
+      - engine
+      - engine_version
+      - modes
+      - osm_data_timestamp
+      - data_version
+      - coverage
+      - limits
+      - defaults
+      - water_parts
+      title: MetaResponse
+      example:
+        coverage:
+          bbox:
+          - 76.6
+          - 43.05
+          - 77.2
+          - 43.45
+          profile: almaty
+        data_version: b0f3c1a9
+        defaults:
+          exclude_water: true
+          rings: false
+        engine: valhalla
+        engine_version: 3.5.1
+        limits:
+          max_contours: 4
+        modes:
+        - pedestrian
+        - bicycle
+        - auto
+        osm_data_timestamp: '2026-05-01T00:00:00Z'
+        service: isochrone-service
+        version: 1.0.0
+        water_parts: 1421
+    ReadyResponse:
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+          - degraded
+          - unavailable
+          title: Status
+          description: Готовность сервиса. unavailable — движок недоступен, ответ 503. degraded — сервис
+            работает, но кэш или слой воды недоступны.
+        components:
+          additionalProperties:
+            $ref: '#/components/schemas/ComponentHealth'
+          type: object
+          title: Components
+          description: Детализация по компонентам.
+      type: object
+      required:
+      - status
+      - components
+      title: ReadyResponse
+      example:
+        components:
+          redis:
+            latency_ms: 0.6
+            status: ok
+          valhalla:
+            latency_ms: 3.2
+            status: ok
+          water_layer:
+            detail: 1421 parts
+            status: ok
+        status: ok
+    TravelMode:
+      type: string
+      enum:
+      - pedestrian
+      - bicycle
+      - auto
+      title: TravelMode
+    ProblemDetail:
+      example:
+        code: POINT_NOT_ROUTABLE
+        detail: Ближайший узел дорожного графа находится в 1840 м от точки, что превышает лимит 500 м.
+        instance: /api/v1/isochrone
+        request_id: 01J9X2K7Q4T8Z0ABCDEFGHJKMN
+        status: 422
+        title: Point is not routable
+        type: https://isochrone.local/errors/point-not-routable
+      properties:
+        type:
+          description: URI типа ошибки, RFC 7807.
+          title: Type
+          type: string
+        title:
+          description: Краткое человекочитаемое название проблемы.
+          title: Title
+          type: string
+        status:
+          description: HTTP-код ответа.
+          title: Status
+          type: integer
+        detail:
+          description: Подробное описание проблемы для конкретного запроса.
+          title: Detail
+          type: string
+        instance:
+          description: Путь запроса, вызвавшего ошибку.
+          title: Instance
+          type: string
+        request_id:
+          description: Идентификатор запроса для поиска в логах.
+          title: Request Id
+          type: string
+        code:
+          description: Машиночитаемый код ошибки.
+          examples:
+          - POINT_NOT_ROUTABLE
+          title: Code
+          type: string
+      required:
+      - type
+      - title
+      - status
+      - detail
+      - instance
+      - request_id
+      - code
+      title: ProblemDetail
+      type: object
+tags:
+- name: isochrone
+  description: Расчёт зон досягаемости.
+- name: system
+  description: 'Служебные эндпоинты: liveness, readiness, метаданные, метрики.'

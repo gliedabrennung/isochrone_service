@@ -1,0 +1,136 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install ruff
+        run: pip install "ruff>=0.6"
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format --check
+        run: ruff format --check .
+
+  unit:
+    name: unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install the API package with dev extras
+        run: pip install -e "./api[dev]"
+      - name: Unit tests and coverage gate
+        run: pytest tests/unit -q --cov=app --cov-report=term-missing --cov-fail-under=70
+      - name: OpenAPI specification is up to date
+        run: python scripts/export_openapi.py --check docs/openapi.yaml
+
+  contract:
+    name: contract tests
+    runs-on: ubuntu-24.04
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install the API package with dev extras
+        run: pip install -e "./api[dev]"
+      - name: Schemathesis fuzzing against the generated schema
+        run: pytest tests/contract -q
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/prepare_data.sh scripts/prepare_water.sh scripts/smoke_test.sh web/render-config.sh
+
+  compose:
+    name: compose validation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy the example environment
+        run: cp .env.example .env
+      - name: docker compose config
+        run: docker compose -f docker-compose.yml config --quiet
+      - name: No floating image tags
+        run: |
+          if grep -nE 'image:.*:latest' docker-compose*.yml; then
+            echo "floating 'latest' tags are not allowed" >&2
+            exit 1
+          fi
+      - name: Only the web service publishes a port
+        run: |
+          published=$(docker compose -f docker-compose.yml config --format json \
+            | python3 -c 'import json,sys; c=json.load(sys.stdin); print(" ".join(sorted(n for n,s in c["services"].items() if s.get("ports"))))')
+          echo "services with published ports: ${published}"
+          test "${published}" = "web"
+
+  integration:
+    name: integration tests
+    runs-on: ubuntu-24.04
+    needs: [unit, compose]
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install the API package with dev extras
+        run: pip install -e "./api[dev]"
+      - name: Copy the example environment
+        run: cp .env.example .env
+      - name: Start the stack on a small extract
+        env:
+          OSM_EXTRACT_URL: ${{ vars.CI_OSM_EXTRACT_URL || 'https://download.geofabrik.de/asia/kazakhstan-latest.osm.pbf' }}
+        run: docker compose -f docker-compose.yml up -d --build
+      - name: Wait for readiness
+        run: |
+          for _ in $(seq 1 120); do
+            if curl -fsS http://localhost:8080/api/v1/ready >/dev/null; then
+              echo "ready"
+              exit 0
+            fi
+            sleep 15
+          done
+          docker compose -f docker-compose.yml logs --tail 200
+          exit 1
+      - name: Smoke test
+        run: ./scripts/smoke_test.sh
+      - name: Integration tests
+        run: RUN_INTEGRATION_TESTS=1 pytest tests/integration -q
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml logs --tail 400
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml down -v

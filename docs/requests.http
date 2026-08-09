@@ -1,0 +1,114 @@
+@baseUrl = http://localhost:8080
+@api = {{baseUrl}}/api/v1
+
+### Liveness
+GET {{api}}/health
+
+### Readiness
+GET {{api}}/ready
+
+### Покрытие, версия данных, лимиты
+GET {{api}}/meta
+
+### Метрики Prometheus
+GET {{baseUrl}}/metrics
+
+### Базовый расчёт: пешком, 10/20/30 минут
+POST {{api}}/isochrone
+Content-Type: application/json
+
+{
+  "lat": 43.238949,
+  "lon": 76.889709,
+  "contours": [10, 20, 30],
+  "mode": "pedestrian",
+  "options": {
+    "denoise": 0.2,
+    "generalize": 100,
+    "rings": false,
+    "exclude_water": true
+  }
+}
+
+### Кольца: непересекающиеся полосы вместо вложенных полигонов
+POST {{api}}/isochrone
+Content-Type: application/json
+
+{
+  "lat": 43.238949,
+  "lon": 76.889709,
+  "contours": [10, 20, 30, 45],
+  "mode": "bicycle",
+  "options": {"rings": true}
+}
+
+### Самый тяжёлый сценарий: автомобиль, 60 минут
+POST {{api}}/isochrone
+Content-Type: application/json
+
+{
+  "lat": 43.238949,
+  "lon": 76.889709,
+  "contours": [60],
+  "mode": "auto"
+}
+
+### Без вырезания воды, для сравнения с предыдущим ответом
+POST {{api}}/isochrone
+Content-Type: application/json
+
+{
+  "lat": 43.244,
+  "lon": 76.868,
+  "contours": [20],
+  "mode": "pedestrian",
+  "options": {"exclude_water": false}
+}
+
+### Свой request_id для сквозной трассировки
+POST {{api}}/isochrone
+Content-Type: application/json
+X-Request-Id: demo-trace-001
+
+{
+  "lat": 43.238949,
+  "lon": 76.889709,
+  "contours": [15],
+  "mode": "pedestrian"
+}
+
+### GET-вариант для шаринга ссылок
+GET {{api}}/isochrone?lat=43.238949&lon=76.889709&contours=10,20,30&mode=auto&rings=true
+
+### Ошибка 422: точка вне покрытия (Астана)
+POST {{api}}/isochrone
+Content-Type: application/json
+
+{"lat": 51.1605, "lon": 71.4704, "contours": [10], "mode": "auto"}
+
+### Ошибка 400: контур вне диапазона 5..60
+POST {{api}}/isochrone
+Content-Type: application/json
+
+{"lat": 43.238949, "lon": 76.889709, "contours": [61], "mode": "auto"}
+
+### Ошибка 400: дубликаты контуров
+POST {{api}}/isochrone
+Content-Type: application/json
+
+{"lat": 43.238949, "lon": 76.889709, "contours": [10, 10], "mode": "auto"}
+
+### Ошибка 400: неизвестное поле в запросе
+POST {{api}}/isochrone
+Content-Type: application/json
+
+{"lat": 43.238949, "lon": 76.889709, "contours": [10], "mode": "auto", "colour": "red"}
+
+### Ошибка 400: битый JSON
+POST {{api}}/isochrone
+Content-Type: application/json
+
+{not json
+
+### Спецификация OpenAPI
+GET {{api}}/openapi.json

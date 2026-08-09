@@ -1,0 +1,162 @@
+name: ${COMPOSE_PROJECT_NAME:-isochrone}
+
+services:
+  data-prep:
+    build:
+      context: .
+      dockerfile: scripts/Dockerfile
+    image: isochrone-data-prep:1.0.0
+    environment:
+      OSM_PROFILE: ${OSM_PROFILE:-almaty}
+      OSM_EXTRACT_URL: ${OSM_EXTRACT_URL:-}
+      OSM_FORCE_REFRESH: ${OSM_FORCE_REFRESH:-false}
+      COVERAGE_BBOX: ${COVERAGE_BBOX:-}
+      WATER_MIN_AREA_M2: ${WATER_MIN_AREA_M2:-5000}
+      WATER_RIVER_WIDTH_M: ${WATER_RIVER_WIDTH_M:-15}
+      WATER_STREAM_WIDTH_M: ${WATER_STREAM_WIDTH_M:-4}
+      WATER_CANAL_WIDTH_M: ${WATER_CANAL_WIDTH_M:-10}
+      WATER_INCLUDE_CANALS: ${WATER_INCLUDE_CANALS:-true}
+      VALHALLA_MAX_DISTANCE_CONTOUR_KM: ${VALHALLA_MAX_DISTANCE_CONTOUR_KM:-200}
+      VALHALLA_MAX_TIME_CONTOUR_MIN: ${VALHALLA_MAX_TIME_CONTOUR_MIN:-60}
+      MAX_CONTOURS: ${MAX_CONTOURS:-4}
+    volumes:
+      - valhalla_tiles:/custom_files
+      - osm_source:/osm
+      - app_data:/data
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /data/meta.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60m
+
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:3.5.1
+    depends_on:
+      data-prep:
+        condition: service_completed_successfully
+    environment:
+      serve_tiles: "True"
+      use_tiles_ignore_pbf: "False"
+      force_rebuild: "False"
+      build_elevation: "False"
+      build_admins: "False"
+      build_time_zones: "False"
+      build_transit: "False"
+      update_existing_config: "True"
+      server_threads: ${VALHALLA_SERVER_THREADS:-4}
+    volumes:
+      - valhalla_tiles:/custom_files
+    expose:
+      - "8002"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8002/status >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 90m
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.10-alpine3.21
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: isochrone-api:1.0.0
+    depends_on:
+      data-prep:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      valhalla:
+        condition: service_started
+    environment:
+      VALHALLA_URL: ${VALHALLA_URL:-http://valhalla:8002}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-604800}
+      CACHE_COORD_PRECISION: ${CACHE_COORD_PRECISION:-4}
+      ENGINE_TIMEOUT_S: ${ENGINE_TIMEOUT_S:-10}
+      MAX_CONTOURS: ${MAX_CONTOURS:-4}
+      MAX_CONTOUR_MINUTES: ${MAX_CONTOUR_MINUTES:-60}
+      MIN_CONTOUR_MINUTES: ${MIN_CONTOUR_MINUTES:-5}
+      MAX_SNAP_DISTANCE_M: ${MAX_SNAP_DISTANCE_M:-500}
+      MAX_BODY_SIZE: ${MAX_BODY_SIZE:-16384}
+      RATE_LIMIT: ${RATE_LIMIT:-10/second}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-20}
+      EXCLUDE_WATER_DEFAULT: ${EXCLUDE_WATER_DEFAULT:-true}
+      RINGS_DEFAULT: ${RINGS_DEFAULT:-false}
+      OSM_PROFILE: ${OSM_PROFILE:-almaty}
+      COVERAGE_BBOX: ${COVERAGE_BBOX:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATA_DIR: /data
+      API_PORT: ${API_PORT:-8000}
+    volumes:
+      - app_data:/data:ro
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8000/api/v1/health", timeout=3).status == 200 else 1)
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: isochrone-web:1.0.0
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      BASEMAP_TILE_URL: ${BASEMAP_TILE_URL:-https://tile.openstreetmap.org/{z}/{x}/{y}.png}
+      BASEMAP_ATTRIBUTION: ${BASEMAP_ATTRIBUTION:-&copy; OpenStreetMap contributors}
+      MAX_CONTOURS: ${MAX_CONTOURS:-4}
+      MIN_CONTOUR_MINUTES: ${MIN_CONTOUR_MINUTES:-5}
+      MAX_CONTOUR_MINUTES: ${MAX_CONTOUR_MINUTES:-60}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  valhalla_tiles:
+  osm_source:
+  app_data:

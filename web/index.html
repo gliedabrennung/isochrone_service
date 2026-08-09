@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Изохроны — демо-стенд</title>
+  <link rel="stylesheet" href="/vendor/maplibre-gl.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="panel" id="panel">
+      <header class="panel__header">
+        <h1>Зоны досягаемости</h1>
+        <p class="panel__subtitle">OpenStreetMap + Valhalla. Демо-стенд для визуальной проверки.</p>
+      </header>
+
+      <section class="field">
+        <label class="field__label" for="lat">Точка старта</label>
+        <div class="field__row">
+          <input type="number" id="lat" step="0.000001" inputmode="decimal" aria-label="Широта">
+          <input type="number" id="lon" step="0.000001" inputmode="decimal" aria-label="Долгота">
+        </div>
+        <p class="field__hint">Кликните по карте или перетащите маркер.</p>
+      </section>
+
+      <section class="field">
+        <span class="field__label">Способ передвижения</span>
+        <div class="segmented" id="mode" role="radiogroup" aria-label="Способ передвижения">
+          <button type="button" class="segmented__item is-active" data-mode="pedestrian" role="radio" aria-checked="true">
+            <span class="segmented__icon" aria-hidden="true">🚶</span> Пешком
+          </button>
+          <button type="button" class="segmented__item" data-mode="bicycle" role="radio" aria-checked="false">
+            <span class="segmented__icon" aria-hidden="true">🚲</span> Велосипед
+          </button>
+          <button type="button" class="segmented__item" data-mode="auto" role="radio" aria-checked="false">
+            <span class="segmented__icon" aria-hidden="true">🚗</span> Авто
+          </button>
+        </div>
+      </section>
+
+      <section class="field">
+        <span class="field__label">Контуры, мин <em id="contours-counter"></em></span>
+        <div class="chips" id="contours"></div>
+      </section>
+
+      <section class="field">
+        <label class="toggle">
+          <input type="checkbox" id="rings">
+          <span>Кольца (rings)</span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="exclude-water" checked>
+          <span>Вырезать воду</span>
+        </label>
+      </section>
+
+      <section class="field">
+        <label class="field__label" for="generalize">
+          Генерализация: <span id="generalize-value">по умолчанию</span>
+        </label>
+        <input type="range" id="generalize" min="0" max="500" step="10" value="-1">
+        <label class="toggle toggle--compact">
+          <input type="checkbox" id="generalize-auto" checked>
+          <span>Подбирать автоматически</span>
+        </label>
+      </section>
+
+      <button type="button" class="button button--primary" id="build">Построить</button>
+
+      <section class="message" id="error" hidden>
+        <strong class="message__title" id="error-title"></strong>
+        <span class="message__detail" id="error-detail"></span>
+        <span class="message__meta" id="error-meta"></span>
+      </section>
+
+      <section class="results" id="results" hidden>
+        <h2>Результат</h2>
+        <ul class="legend" id="legend"></ul>
+        <dl class="stats" id="stats"></dl>
+        <button type="button" class="button" id="download">Скачать GeoJSON</button>
+      </section>
+
+      <footer class="panel__footer">
+        <a href="/api/v1/docs" target="_blank" rel="noopener">Swagger UI</a>
+        <span aria-hidden="true">·</span>
+        <a href="/api/v1/meta" target="_blank" rel="noopener">/meta</a>
+        <span aria-hidden="true">·</span>
+        <a href="/api/v1/ready" target="_blank" rel="noopener">/ready</a>
+      </footer>
+    </aside>
+
+    <main class="map-wrapper">
+      <div id="map" class="map"></div>
+      <div class="map-hint" id="map-hint">Кликните по карте, чтобы выбрать точку старта</div>
+    </main>
+  </div>
+
+  <script src="/config.js"></script>
+  <script src="/vendor/maplibre-gl.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "profile": "almaty",
+  "bbox": [
+    76.6,
+    43.05,
+    77.2,
+    43.45
+  ],
+  "osm_data_timestamp": "2026-05-01T00:00:00Z",
+  "data_version": "testfixture0001",
+  "prepared_at": "2026-08-09T00:00:00Z",
+  "source_url": "https://download.geofabrik.de/asia/kazakhstan-latest.osm.pbf",
+  "water_parts": 1
+}

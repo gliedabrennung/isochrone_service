@@ -1,0 +1,1 @@
+{"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[[76.86, 43.24], [76.876, 43.24], [76.876, 43.248], [76.86, 43.248], [76.86, 43.24]]]}, "properties": {"area_m2": 1030000.0, "name": "Sayran test lake"}}], "properties": {"min_area_m2": 5000.0}}
