@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sys
@@ -21,6 +22,7 @@ os.environ.setdefault("RATE_LIMIT", "5000/second")
 os.environ.setdefault("RATE_LIMIT_BURST", "10000")
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("OSM_PROFILE", "almaty")
+os.environ.setdefault("ENGINE_POLL_INTERVAL_S", "3600")
 
 from support import ORIGIN_LAT, ORIGIN_LON, FakeCache, StubEngine  # noqa: E402
 
@@ -30,6 +32,7 @@ class ApiHarness:
     client: Any
     engine: StubEngine
     cache: FakeCache
+    monitor: Any
     app: Any
 
 
@@ -51,11 +54,17 @@ def api(_test_client) -> ApiHarness:
 
     app.state.engine = engine
     app.state.cache = cache
+
+    monitor = app.state.engine_monitor
+    monitor.client = engine
+    asyncio.run(monitor.refresh())
+
     service = app.state.isochrone_service
     service.engine = engine
     service.cache = cache
+    service.monitor = monitor
 
-    return ApiHarness(client=client, engine=engine, cache=cache, app=app)
+    return ApiHarness(client=client, engine=engine, cache=cache, monitor=monitor, app=app)
 
 
 @pytest.fixture

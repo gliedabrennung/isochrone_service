@@ -375,39 +375,47 @@ class HealthResponse(BaseModel):
     version: str = Field(description="Версия сервиса.", examples=["1.0.0"])
 
 
-class ComponentHealth(BaseModel):
-    model_config = ConfigDict(
-        json_schema_extra={"example": {"status": "ok", "detail": None, "latency_ms": 4.1}}
-    )
-
-    status: Literal["ok", "degraded", "unavailable"] = Field(
-        description="Состояние компонента.", examples=["ok"]
-    )
-    detail: str | None = Field(default=None, description="Пояснение при отклонении от нормы.")
-    latency_ms: float | None = Field(default=None, description="Время ответа компонента, мс.")
+class ComponentState(StrEnum):
+    ok = "ok"
+    degraded = "degraded"
+    unavailable = "unavailable"
 
 
 class ReadyResponse(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "status": "ok",
+                "status": "degraded",
                 "components": {
-                    "valhalla": {"status": "ok", "latency_ms": 3.2},
-                    "redis": {"status": "ok", "latency_ms": 0.6},
-                    "water_layer": {"status": "ok", "detail": "1421 parts"},
+                    "engine": "ok",
+                    "cache": "unavailable",
+                    "water_layer": "ok",
+                    "dataset": "ok",
                 },
+                "detail": "Кэш недоступен, запросы обрабатываются без кэширования.",
             }
         }
     )
 
     status: Literal["ok", "degraded", "unavailable"] = Field(
         description=(
-            "Готовность сервиса. unavailable — движок недоступен, ответ 503. "
-            "degraded — сервис работает, но кэш или слой воды недоступны."
-        )
+            "Ответ на вопрос «можно ли направлять сюда трафик». "
+            "ok — все компоненты в норме; degraded — движок доступен, что-то из "
+            "необязательных компонентов нет; unavailable — движок недоступен, ответ 503. "
+            "Система мониторинга различает ok и degraded по телу ответа, "
+            "оркестратор — по HTTP-коду."
+        ),
+        examples=["ok"],
     )
-    components: dict[str, ComponentHealth] = Field(description="Детализация по компонентам.")
+    components: dict[str, ComponentState] = Field(
+        description="Состояние каждого компонента: engine, cache, water_layer, dataset.",
+        examples=[{"engine": "ok", "cache": "ok", "water_layer": "ok", "dataset": "ok"}],
+    )
+    detail: str | None = Field(
+        default=None,
+        description="Пояснение к состоянию, если оно отличается от ok.",
+        examples=["Кэш недоступен, запросы обрабатываются без кэширования."],
+    )
 
 
 class MetaLimits(BaseModel):

@@ -29,7 +29,7 @@ from app.services.cache import CacheService
 from app.services.dataset import load_dataset_meta
 from app.services.geometry import WaterIndex
 from app.services.isochrone import IsochroneService
-from app.services.valhalla import ValhallaClient
+from app.services.valhalla import EngineMonitor, ValhallaClient
 
 logger = get_logger("app.main")
 
@@ -76,16 +76,35 @@ async def lifespan(app: FastAPI):
     app.state.dataset_meta = load_dataset_meta(settings)
     app.state.water = await asyncio.to_thread(WaterIndex.from_file, settings.water_path)
 
-    app.state.cache = CacheService(settings.redis_url, settings.cache_ttl_seconds)
+    app.state.cache = CacheService(
+        settings.redis_url,
+        settings.cache_ttl_seconds,
+        connect_timeout_ms=settings.redis_connect_timeout_ms,
+        breaker_threshold=settings.redis_breaker_threshold,
+        breaker_cooldown_s=settings.redis_breaker_cooldown_s,
+    )
     await app.state.cache.connect()
 
-    app.state.engine = ValhallaClient(settings.valhalla_url, settings.engine_timeout_s)
+    app.state.engine = ValhallaClient(
+        settings.valhalla_url,
+        settings.engine_timeout_s,
+        connect_timeout_s=settings.engine_connect_timeout_s,
+    )
+    app.state.engine_monitor = EngineMonitor(
+        app.state.engine,
+        poll_interval_s=settings.engine_poll_interval_s,
+        profile=settings.osm_profile,
+    )
+    await app.state.engine_monitor.refresh()
+    app.state.engine_monitor.start()
+
     app.state.isochrone_service = IsochroneService(
         settings=settings,
         engine=app.state.engine,
         cache=app.state.cache,
         water=app.state.water,
         meta=app.state.dataset_meta,
+        monitor=app.state.engine_monitor,
     )
 
     logger.info(
@@ -99,6 +118,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         logger.info("service_stopping")
+        await app.state.engine_monitor.stop()
         await app.state.engine.aclose()
         await app.state.cache.aclose()
         logger.info("service_stopped")

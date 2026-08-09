@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose
 COMPOSE_PROD := docker compose -f docker-compose.yml
-COMPOSE_DEV := docker compose -f docker-compose.yml -f docker-compose.override.yml
+COMPOSE_DEV := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 COMPOSE_DEBUG := docker compose -f docker-compose.yml -f docker-compose.debug.yml
 WEB_PORT ?= 8080
 BASE_URL ?= http://localhost:$(WEB_PORT)
@@ -11,7 +11,8 @@ PY := $(shell test -x $(CURDIR)/api/.venv/bin/python && echo $(CURDIR)/api/.venv
 .DEFAULT_GOAL := help
 .PHONY: help up down dev debug restart logs logs-valhalla ps build \
         smoke test test-unit test-integration test-contract cov lint fmt fmt-check \
-        openapi openapi-check rebuild-tiles update-data load-test clean venv
+        openapi openapi-check rebuild-tiles update-data load-test load-test-degraded \
+        clean venv
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -97,6 +98,10 @@ load-test: ## Нагрузочный тест k6: 10 RPS x 5 мин
 		-e BASE_URL=$(BASE_URL) \
 		-v "$(CURDIR)/load:/load" \
 		grafana/k6:0.53.0 run /load/k6-scenario.js
+
+load-test-degraded: ## AC-12 + AC-09 одним прогоном: тот же k6 при остановленном Redis
+	$(COMPOSE_PROD) stop redis
+	@status=0; $(MAKE) load-test || status=$$?; $(COMPOSE_PROD) start redis; exit $$status
 
 clean: ## Удалить контейнеры и все volume (данные будут скачаны заново)
 	$(COMPOSE_PROD) down -v

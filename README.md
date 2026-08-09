@@ -110,18 +110,22 @@ $ curl -s localhost:8080/api/v1/health
 ```bash
 $ curl -s localhost:8080/api/v1/ready | python3 -m json.tool
 {
-    "status": "ok",
+    "status": "degraded",
     "components": {
-        "valhalla":    {"status": "ok", "detail": "version 3.5.1", "latency_ms": 3.2},
-        "redis":       {"status": "ok", "detail": null, "latency_ms": 0.6},
-        "water_layer": {"status": "ok", "detail": "1421 parts", "latency_ms": null},
-        "dataset":     {"status": "ok", "detail": "profile almaty, osm 2026-05-01T00:00:00Z", "latency_ms": null}
-    }
+        "engine": "ok",
+        "cache": "unavailable",
+        "water_layer": "ok",
+        "dataset": "ok"
+    },
+    "detail": "Кэш недоступен, запросы обрабатываются без кэширования."
 }
 ```
 
-`503` возвращается только при недоступном движке. Отказ Redis или отсутствие слоя воды дают
-`200` со `status: "degraded"` — сервис продолжает считать изохроны.
+Эндпоинт отвечает на вопрос «можно ли направлять сюда трафик», а не «все ли зависимости
+в норме». `503` возвращается только при недоступном движке. Отказ кэша, отсутствие слоя
+воды или метаданных дают `200` со `status: "degraded"` — сервис продолжает считать
+изохроны, теряя только скорость. Система мониторинга различает `ok` и `degraded` по телу
+ответа, оркестратор — по HTTP-коду.
 
 ### Метаданные покрытия
 
@@ -252,7 +256,7 @@ curl -s localhost:8080/metrics | grep isochrone_
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `COMPOSE_FILE` | `docker-compose.yml` | Список compose-файлов. Держит dev-оверрайд выключенным по умолчанию |
+| `COMPOSE_PROJECT_NAME` | `isochrone` | Префикс имён контейнеров и volume |
 | `OSM_PROFILE` | `almaty` | Профиль покрытия: `almaty` \| `almaty-region` \| `kazakhstan` |
 | `OSM_EXTRACT_URL` | — | Прямая ссылка на PBF, переопределяет источник профиля |
 | `OSM_FORCE_REFRESH` | `false` | Перекачать исходный PBF даже при наличии в volume |
@@ -266,7 +270,11 @@ curl -s localhost:8080/metrics | grep isochrone_
 | `REDIS_URL` | `redis://redis:6379/0` | Адрес кэша |
 | `CACHE_TTL_SECONDS` | `604800` | TTL кэша, 7 суток |
 | `CACHE_COORD_PRECISION` | `4` | Округление координат в ключе кэша (4 знака ≈ 11 м) |
-| `ENGINE_TIMEOUT_S` | `10` | Таймаут обращения к движку |
+| `REDIS_CONNECT_TIMEOUT_MS` | `150` | Таймаут установки соединения с Redis |
+| `REDIS_BREAKER_THRESHOLD` / `REDIS_BREAKER_COOLDOWN_S` | `3` / `30` | Circuit breaker кэша: неудач подряд до размыкания и пауза до пробной попытки |
+| `ENGINE_TIMEOUT_S` | `10` | Таймаут чтения ответа движка |
+| `ENGINE_CONNECT_TIMEOUT_S` | `1` | Таймаут установки соединения с движком |
+| `ENGINE_POLL_INTERVAL_S` | `5` | Интервал фоновой проверки готовности движка |
 | `MAX_CONTOURS` | `4` | Максимум контуров в запросе |
 | `MIN_CONTOUR_MINUTES` / `MAX_CONTOUR_MINUTES` | `5` / `60` | Границы времени контура |
 | `MAX_SNAP_DISTANCE_M` | `500` | Порог отсечения нероутируемых точек |
@@ -289,10 +297,17 @@ make clean   # остановить и удалить volume
 make help    # все цели
 ```
 
-Dev-профиль лежит в `docker-compose.override.yml`, но **не подхватывается автоматически**:
-`.env` задаёт `COMPOSE_FILE=docker-compose.yml`. Так «обычный» `docker compose up -d` не
-публикует наружу лишние порты. Для dev-режима используйте `make dev` либо
-`COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml docker compose up -d`.
+Dev-профиль лежит в `docker-compose.dev.yml` и подключается **только явным перечислением
+файлов**. Имя `docker-compose.override.yml` намеренно не используется: такой файл Compose
+подхватывает автоматически, и обычный `docker compose up -d` публиковал бы наружу порты
+`api`/`valhalla`/`redis` (нарушение AC-18). Небезопасная конфигурация должна быть
+недостижима, а не отключаться переменной в `.env`, которую легко забыть скопировать.
+
+```bash
+make dev
+# то же самое вручную:
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
 
 ## 7. Как сменить регион покрытия
 
@@ -424,9 +439,12 @@ down -v`, и что `data-prep` находит совпадающий `data_vers
 и при необходимости запустите с `--platform linux/arm64`. Собирать тайлы под эмуляцией
 QEMU не рекомендуется: используйте Linux-стенд.
 
-**Redis остановлен.** Сервис продолжает работать: в логах появляются
-`cache_get_failed` / `cache_set_failed` с уровнем `warning`, `/ready` показывает
-`redis: degraded`, ответы считаются каждый раз заново.
+**Redis остановлен.** Сервис продолжает работать: в лог один раз пишется `cache_unavailable`
+с уровнем `warning` (не на каждый запрос), `/ready` показывает `cache: unavailable` со
+`status: degraded` и кодом `200`, ответы считаются каждый раз заново. Соединение с Redis
+ограничено `REDIS_CONNECT_TIMEOUT_MS` (150 мс), а после `REDIS_BREAKER_THRESHOLD` неудач
+подряд кэш исключается из обработки на `REDIS_BREAKER_COOLDOWN_S` — время ответа при
+мёртвом Redis не растёт. При возврате Redis в строй пишется `cache_recovered`.
 
 **Слой воды пуст (`water_parts: 0`).** Посмотрите `docker compose logs data-prep`: скорее
 всего, `osmium tags-filter` не нашёл объектов в выбранном bbox или упал `ogr2ogr`.
@@ -444,7 +462,12 @@ make openapi       # выгрузить docs/openapi.yaml
 make up && make smoke
 make test-integration
 make load-test     # k6: 10 RPS × 5 мин
+make load-test-degraded  # тот же прогон при остановленном Redis (AC-12 вместе с AC-09)
 ```
+
+`load-test-degraded` проверяет AC-12 так, как того требует ТЗ: изолированная проверка
+«вернулся 200» пропускает деградацию по времени из-за таймаутов клиента Redis, поэтому
+нормативы п. 10.2 подтверждаются на прогоне с выключенным кэшем.
 
 Структура репозитория и назначение модулей описаны в
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), чек-лист приёмки —

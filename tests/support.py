@@ -126,8 +126,8 @@ class FakeCache:
     async def aclose(self) -> None:
         return None
 
-    async def ping(self) -> float | None:
-        return 0.1 if self.enabled else None
+    async def ping(self) -> bool:
+        return self.enabled
 
     async def get(self, key: str) -> dict[str, Any] | None:
         self.reads += 1

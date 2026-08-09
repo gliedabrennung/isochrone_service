@@ -97,7 +97,12 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-604800}
       CACHE_COORD_PRECISION: ${CACHE_COORD_PRECISION:-4}
+      REDIS_CONNECT_TIMEOUT_MS: ${REDIS_CONNECT_TIMEOUT_MS:-150}
+      REDIS_BREAKER_THRESHOLD: ${REDIS_BREAKER_THRESHOLD:-3}
+      REDIS_BREAKER_COOLDOWN_S: ${REDIS_BREAKER_COOLDOWN_S:-30}
       ENGINE_TIMEOUT_S: ${ENGINE_TIMEOUT_S:-10}
+      ENGINE_CONNECT_TIMEOUT_S: ${ENGINE_CONNECT_TIMEOUT_S:-1}
+      ENGINE_POLL_INTERVAL_S: ${ENGINE_POLL_INTERVAL_S:-5}
       MAX_CONTOURS: ${MAX_CONTOURS:-4}
       MAX_CONTOUR_MINUTES: ${MAX_CONTOUR_MINUTES:-60}
       MIN_CONTOUR_MINUTES: ${MIN_CONTOUR_MINUTES:-5}
@@ -139,7 +144,7 @@ services:
     image: isochrone-web:1.0.0
     depends_on:
       api:
-        condition: service_healthy
+        condition: service_started
     environment:
       BASEMAP_TILE_URL: ${BASEMAP_TILE_URL:-https://tile.openstreetmap.org/{z}/{x}/{y}.png}
       BASEMAP_ATTRIBUTION: ${BASEMAP_ATTRIBUTION:-&copy; OpenStreetMap contributors}

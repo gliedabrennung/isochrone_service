@@ -33,6 +33,7 @@ from app.services.geometry import (
     round_geometry,
 )
 from app.services.valhalla import (
+    EngineMonitor,
     ValhallaClient,
     build_isochrone_payload,
     parse_isochrone_response,
@@ -65,12 +66,14 @@ class IsochroneService:
         cache: CacheService,
         water: WaterIndex,
         meta: DatasetMeta,
+        monitor: EngineMonitor | None = None,
     ) -> None:
         self.settings = settings
         self.engine = engine
         self.cache = cache
         self.water = water
         self.meta = meta
+        self.monitor = monitor
 
     def resolve_smoothing(self, request: IsochroneRequest) -> tuple[float, int]:
         denoise_default, generalize_default = smoothing_defaults(request.max_contour)
@@ -128,6 +131,9 @@ class IsochroneService:
             )
 
         CACHE_MISSES.inc()
+        if self.monitor is not None and not self.monitor.ready:
+            raise ProblemError("ENGINE_UNAVAILABLE", self.monitor.unavailable_detail())
+
         engine_payload = build_isochrone_payload(
             lat=request.lat,
             lon=request.lon,

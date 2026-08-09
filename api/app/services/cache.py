@@ -13,7 +13,6 @@ from app.core.metrics import CACHE_ERRORS
 logger = get_logger("app.cache")
 
 KEY_PREFIX = "isochrone:v1"
-FAILURE_BACKOFF_S = 5.0
 
 
 def make_cache_key(
@@ -49,12 +48,23 @@ def make_cache_key(
 
 
 class CacheService:
-    def __init__(self, url: str, ttl_seconds: int, timeout_s: float = 0.5) -> None:
+    def __init__(
+        self,
+        url: str,
+        ttl_seconds: int,
+        connect_timeout_ms: int = 150,
+        breaker_threshold: int = 3,
+        breaker_cooldown_s: float = 30.0,
+    ) -> None:
         self.url = url
         self.ttl_seconds = ttl_seconds
-        self._timeout_s = timeout_s
+        self._timeout_s = connect_timeout_ms / 1000
+        self._breaker_threshold = max(breaker_threshold, 1)
+        self._breaker_cooldown_s = breaker_cooldown_s
         self._client: redis.Redis | None = None
-        self._skip_until = 0.0
+        self._failures = 0
+        self._open_until = 0.0
+        self._healthy = True
 
     async def connect(self) -> None:
         try:
@@ -67,10 +77,9 @@ class CacheService:
                 health_check_interval=30,
             )
             await self._client.ping()
-            logger.info("cache_connected", url=self.url)
+            logger.info("cache_connected", url=self.url, connect_timeout_ms=self._timeout_s * 1000)
         except (RedisError, OSError, ValueError) as exc:
-            logger.warning("cache_unavailable_at_startup", url=self.url, error=str(exc))
-            self._degrade("connect")
+            self._record_failure("connect", str(exc))
 
     async def aclose(self) -> None:
         if self._client is not None:
@@ -80,21 +89,51 @@ class CacheService:
 
     @property
     def enabled(self) -> bool:
-        return self._client is not None and time.monotonic() >= self._skip_until
-
-    def _degrade(self, operation: str) -> None:
-        CACHE_ERRORS.labels(operation=operation).inc()
-        self._skip_until = time.monotonic() + FAILURE_BACKOFF_S
-
-    async def ping(self) -> float | None:
         if self._client is None:
-            return None
-        started = time.perf_counter()
+            return False
+        return not self._open_until or time.monotonic() >= self._open_until
+
+    @property
+    def healthy(self) -> bool:
+        return self._client is not None and self._healthy
+
+    @property
+    def breaker_open(self) -> bool:
+        return bool(self._open_until) and time.monotonic() < self._open_until
+
+    def _record_failure(self, operation: str, error: str) -> None:
+        CACHE_ERRORS.labels(operation=operation).inc()
+        self._failures += 1
+        if self._failures >= self._breaker_threshold:
+            self._open_until = time.monotonic() + self._breaker_cooldown_s
+        if self._healthy:
+            self._healthy = False
+            logger.warning(
+                "cache_unavailable",
+                url=self.url,
+                operation=operation,
+                error=error,
+                failures=self._failures,
+                cooldown_s=self._breaker_cooldown_s if self._open_until else 0,
+            )
+
+    def _record_success(self) -> None:
+        self._failures = 0
+        self._open_until = 0.0
+        if not self._healthy:
+            self._healthy = True
+            logger.warning("cache_recovered", url=self.url)
+
+    async def ping(self) -> bool:
+        if self._client is None:
+            return False
         try:
             await self._client.ping()
-        except (RedisError, OSError):
-            return None
-        return round((time.perf_counter() - started) * 1000, 2)
+        except (RedisError, OSError) as exc:
+            self._record_failure("ping", str(exc))
+            return False
+        self._record_success()
+        return True
 
     async def get(self, key: str) -> dict[str, Any] | None:
         if not self.enabled:
@@ -102,9 +141,9 @@ class CacheService:
         try:
             raw = await self._client.get(key)
         except (RedisError, OSError) as exc:
-            logger.warning("cache_get_failed", error=str(exc))
-            self._degrade("get")
+            self._record_failure("get", str(exc))
             return None
+        self._record_success()
         if not raw:
             return None
         try:
@@ -123,5 +162,6 @@ class CacheService:
                 ex=self.ttl_seconds,
             )
         except (RedisError, OSError) as exc:
-            logger.warning("cache_set_failed", error=str(exc))
-            self._degrade("set")
+            self._record_failure("set", str(exc))
+            return
+        self._record_success()

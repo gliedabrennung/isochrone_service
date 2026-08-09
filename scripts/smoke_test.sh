@@ -47,28 +47,28 @@ wait_for_ready() {
 
 echo "smoke test against ${BASE_URL}"
 
-echo "[1/6] liveness"
+echo "[1/7] liveness"
 if [ "$(http_status "${API}/health")" = "200" ]; then
   pass "GET /health -> 200"
 else
   fail "GET /health" "$(cat /tmp/smoke_body.json 2>/dev/null)"
 fi
 
-echo "[2/6] readiness"
+echo "[2/7] readiness"
 if wait_for_ready; then
   pass "GET /ready -> 200"
 else
   fail "GET /ready" "движок не поднялся за ${READY_TIMEOUT_S} с, проверьте: docker compose logs -f valhalla"
 fi
 
-echo "[3/6] metadata"
+echo "[3/7] metadata"
 if [ "$(http_status "${API}/meta")" = "200" ]; then
   pass "GET /meta -> 200 (osm $(json_field osm_data_timestamp))"
 else
   fail "GET /meta"
 fi
 
-echo "[4/6] расчёт по трём режимам"
+echo "[4/7] расчёт по трём режимам"
 for MODE in pedestrian bicycle auto; do
   STATUS=$(http_status -X POST "${API}/isochrone" \
     -H 'Content-Type: application/json' \
@@ -81,7 +81,7 @@ for MODE in pedestrian bicycle auto; do
   fi
 done
 
-echo "[5/6] негативный сценарий: точка вне покрытия"
+echo "[5/7] негативный сценарий: точка вне покрытия"
 STATUS=$(http_status -X POST "${API}/isochrone" \
   -H 'Content-Type: application/json' \
   -d '{"lat":51.1605,"lon":71.4704,"contours":[10],"mode":"auto"}')
@@ -92,7 +92,7 @@ else
   fail "POST /isochrone вне bbox" "status=${STATUS} code=${CODE}"
 fi
 
-echo "[6/6] негативный сценарий: невалидные параметры"
+echo "[6/7] негативный сценарий: невалидные параметры"
 STATUS=$(http_status -X POST "${API}/isochrone" \
   -H 'Content-Type: application/json' \
   -d "{\"lat\":${LAT},\"lon\":${LON},\"contours\":[61],\"mode\":\"auto\"}")
@@ -101,6 +101,22 @@ if [ "$STATUS" = "400" ] && [ "$CODE" = "VALIDATION_ERROR" ]; then
   pass "POST /isochrone contours=[61] -> 400 VALIDATION_ERROR"
 else
   fail "POST /isochrone contours=[61]" "status=${STATUS} code=${CODE}"
+fi
+
+echo "[7/7] наружу опубликован только порт web (AC-18)"
+COMPOSE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "${SMOKE_SKIP_PORT_CHECK:-0}" = "1" ]; then
+  echo "  SKIP  проверка портов отключена через SMOKE_SKIP_PORT_CHECK=1"
+elif ! docker compose version >/dev/null 2>&1; then
+  fail "проверка опубликованных портов" "docker compose недоступен; для запуска против удалённого стенда выставьте SMOKE_SKIP_PORT_CHECK=1"
+else
+  PUBLISHED=$(docker compose -f "${COMPOSE_ROOT}/docker-compose.yml" config --format json 2>/dev/null |
+    python3 -c 'import json,sys; c=json.load(sys.stdin); print(" ".join(sorted(n for n, s in c["services"].items() if s.get("ports"))))')
+  if [ "$PUBLISHED" = "web" ]; then
+    pass "порты публикует только web"
+  else
+    fail "опубликованные порты" "ожидалось 'web', получено '${PUBLISHED}'"
+  fi
 fi
 
 echo

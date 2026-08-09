@@ -26,8 +26,8 @@ def test_ready_reports_every_component(api):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] in ("ok", "degraded")
-    assert set(body["components"]) == {"valhalla", "redis", "water_layer", "dataset"}
-    assert body["components"]["valhalla"]["status"] == "ok"
+    assert set(body["components"]) == {"engine", "cache", "water_layer", "dataset"}
+    assert body["components"]["engine"] == "ok"
 
 
 def test_ready_returns_503_while_the_engine_is_unavailable(api):
@@ -35,7 +35,18 @@ def test_ready_returns_503_while_the_engine_is_unavailable(api):
     response = api.client.get("/api/v1/ready")
     assert response.status_code == 503
     assert response.json()["status"] == "unavailable"
-    assert response.json()["components"]["valhalla"]["status"] == "unavailable"
+    assert response.json()["components"]["engine"] == "unavailable"
+
+
+def test_ready_stays_200_when_only_the_cache_is_down(api):
+    api.cache.enabled = False
+    response = api.client.get("/api/v1/ready")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["components"]["engine"] == "ok"
+    assert body["components"]["cache"] == "unavailable"
+    assert "кэш" in body["detail"].lower()
 
 
 def test_meta_describes_coverage_limits_and_defaults(api):
@@ -265,6 +276,18 @@ def test_engine_unavailable_is_propagated_as_503(api):
     response = api.client.post(ENDPOINT, json=payload())
     assert response.status_code == 503
     assert response.json()["code"] == "ENGINE_UNAVAILABLE"
+
+
+async def test_isochrone_returns_503_without_calling_an_engine_that_is_not_ready(api):
+    api.engine.error = ConnectionRefusedError("connection refused")
+    await api.monitor.refresh()
+    api.engine.calls.clear()
+
+    response = api.client.post(ENDPOINT, json=payload())
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "ENGINE_UNAVAILABLE"
+    assert api.engine.calls == []
 
 
 def test_engine_timeout_is_propagated_as_504(api):

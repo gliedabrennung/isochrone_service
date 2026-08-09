@@ -1,5 +1,3 @@
-import time
-
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
@@ -7,7 +5,7 @@ from app import __version__
 from app.config import ENGINE_NAME, SMOOTHING_DEFAULTS, get_settings
 from app.core.metrics import render_metrics
 from app.schemas import (
-    ComponentHealth,
+    ComponentState,
     HealthResponse,
     MetaCoverage,
     MetaLimits,
@@ -16,6 +14,7 @@ from app.schemas import (
     TravelMode,
 )
 from app.services.geometry import bbox_polygon
+from app.services.valhalla import EngineState
 
 router = APIRouter(tags=["system"])
 metrics_router = APIRouter(tags=["system"])
@@ -38,10 +37,13 @@ async def health() -> HealthResponse:
     "/ready",
     summary="Readiness",
     description=(
-        "Проверка готовности обслуживать запросы. Обращается к Valhalla, Redis и слою воды.\n\n"
+        "Ответ на вопрос «можно ли направлять сюда трафик». Проверяются движок, кэш, "
+        "слой воды и метаданные покрытия.\n\n"
         "Ответ 503 возвращается только при недоступности движка: без него расчёт невозможен. "
-        "Недоступность Redis или слоя воды переводит сервис в состояние degraded, "
-        "но не приводит к отказу (см. п. 10.3 ТЗ)."
+        "Недоступность кэша, слоя воды или метаданных переводит сервис в состояние degraded "
+        "с кодом 200 — сервис отдаёт корректные ответы, теряя только скорость "
+        "(п. 6.4 и 10.3 ТЗ). Система мониторинга различает ok и degraded по телу ответа, "
+        "оркестратор — по HTTP-коду."
     ),
     response_model=ReadyResponse,
     responses={
@@ -53,72 +55,57 @@ async def health() -> HealthResponse:
     },
 )
 async def ready(request: Request) -> Response:
-    engine = getattr(request.app.state, "engine", None)
+    monitor = getattr(request.app.state, "engine_monitor", None)
     cache = getattr(request.app.state, "cache", None)
     water = getattr(request.app.state, "water", None)
     meta = getattr(request.app.state, "dataset_meta", None)
 
-    components: dict[str, ComponentHealth] = {}
+    components: dict[str, ComponentState] = {}
+    notes: list[str] = []
 
     engine_ok = False
-    if engine is None:
-        components["valhalla"] = ComponentHealth(
-            status="unavailable", detail="client is not initialized"
-        )
+    if monitor is None:
+        components["engine"] = ComponentState.unavailable
+        notes.append("Клиент движка не инициализирован.")
     else:
-        started = time.perf_counter()
-        try:
-            status_payload = await engine.status()
-            engine_ok = True
-            components["valhalla"] = ComponentHealth(
-                status="ok",
-                detail=f"version {status_payload.get('version', 'unknown')}",
-                latency_ms=round((time.perf_counter() - started) * 1000, 2),
-            )
-        except Exception as exc:
-            components["valhalla"] = ComponentHealth(
-                status="unavailable",
-                detail=f"{type(exc).__name__}: сборка тайлов не завершена либо движок не отвечает",
-            )
+        engine_ok = await monitor.refresh() is EngineState.ready
+        components["engine"] = ComponentState.ok if engine_ok else ComponentState.unavailable
+        if not engine_ok:
+            notes.append(monitor.unavailable_detail())
 
-    if cache is None:
-        components["redis"] = ComponentHealth(status="degraded", detail="cache is disabled")
+    if cache is not None and await cache.ping():
+        components["cache"] = ComponentState.ok
     else:
-        latency = await cache.ping()
-        if latency is None:
-            components["redis"] = ComponentHealth(
-                status="degraded", detail="кэш недоступен, сервис работает без кэша"
-            )
-        else:
-            components["redis"] = ComponentHealth(status="ok", latency_ms=latency)
+        components["cache"] = ComponentState.unavailable
+        notes.append("Кэш недоступен, запросы обрабатываются без кэширования.")
 
-    if water is None or not water.available:
-        components["water_layer"] = ComponentHealth(
-            status="degraded", detail="слой воды не загружен, вырезание водоёмов отключено"
-        )
+    if water is not None and water.available:
+        components["water_layer"] = ComponentState.ok
     else:
-        components["water_layer"] = ComponentHealth(status="ok", detail=f"{water.part_count} parts")
+        components["water_layer"] = ComponentState.degraded
+        notes.append("Слой воды не загружен, вырезание водоёмов отключено.")
 
-    if meta is None or not meta.complete:
-        components["dataset"] = ComponentHealth(
-            status="degraded", detail="metadata из data/meta.json недоступна"
-        )
+    if meta is not None and meta.complete:
+        components["dataset"] = ComponentState.ok
     else:
-        components["dataset"] = ComponentHealth(
-            status="ok", detail=f"profile {meta.profile}, osm {meta.osm_data_timestamp}"
-        )
+        components["dataset"] = ComponentState.degraded
+        notes.append("Метаданные покрытия из data/meta.json недоступны.")
 
     if not engine_ok:
         status = "unavailable"
         http_status = 503
-    elif any(component.status != "ok" for component in components.values()):
-        status = "degraded"
-        http_status = 200
-    else:
+    elif all(state is ComponentState.ok for state in components.values()):
         status = "ok"
         http_status = 200
+    else:
+        status = "degraded"
+        http_status = 200
 
-    payload = ReadyResponse(status=status, components=components)
+    payload = ReadyResponse(
+        status=status,
+        components=components,
+        detail=" ".join(notes) if notes else None,
+    )
     return JSONResponse(status_code=http_status, content=payload.model_dump())
 
 

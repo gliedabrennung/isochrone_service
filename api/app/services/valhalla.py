@@ -1,9 +1,13 @@
+import asyncio
+import contextlib
 import time
+from enum import StrEnum
 from typing import Any
 
 import httpx
 from shapely.geometry import shape
 
+from app.config import TILE_BUILD_ESTIMATE_MINUTES
 from app.core.errors import ProblemError
 from app.core.logging import get_logger
 
@@ -28,11 +32,17 @@ _POLYGON_TYPES = ("Polygon", "MultiPolygon")
 
 
 class ValhallaClient:
-    def __init__(self, base_url: str, timeout_s: float, max_connections: int = 32) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_s: float,
+        connect_timeout_s: float = 1.0,
+        max_connections: int = 32,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=httpx.Timeout(timeout_s, connect=min(timeout_s, 5.0)),
+            timeout=httpx.Timeout(timeout_s, connect=connect_timeout_s),
             limits=httpx.Limits(
                 max_connections=max_connections,
                 max_keepalive_connections=max_connections // 2 or 1,
@@ -117,6 +127,94 @@ class ValhallaClient:
             code,
             f"{engine_message} (код движка {engine_code}).",
             extra={"engine_error_code": engine_code},
+        )
+
+
+class EngineState(StrEnum):
+    ready = "ready"
+    preparing = "preparing"
+    unavailable = "unavailable"
+
+
+class EngineMonitor:
+    def __init__(
+        self,
+        client: ValhallaClient,
+        poll_interval_s: float,
+        profile: str = "almaty",
+    ) -> None:
+        self.client = client
+        self._poll_interval_s = poll_interval_s
+        self._profile = profile
+        self._state = EngineState.preparing
+        self._error: str | None = None
+        self._started_at = time.monotonic()
+        self._task: asyncio.Task | None = None
+
+    @property
+    def state(self) -> EngineState:
+        return self._state
+
+    @property
+    def ready(self) -> bool:
+        return self._state is EngineState.ready
+
+    @property
+    def error(self) -> str | None:
+        return self._error
+
+    async def refresh(self) -> EngineState:
+        previous = self._state
+        try:
+            await self.client.status()
+            self._state = EngineState.ready
+            self._error = None
+        except Exception as exc:
+            self._error = f"{type(exc).__name__}: {exc}"
+            if previous is not EngineState.preparing:
+                self._state = EngineState.unavailable
+
+        if self._state is not previous:
+            logger.warning(
+                "engine_state_changed",
+                previous=previous.value,
+                current=self._state.value,
+                error=self._error,
+            )
+        return self._state
+
+    def start(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._loop(), name="engine-monitor")
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await self._task
+        self._task = None
+
+    async def _loop(self) -> None:
+        while True:
+            await self.refresh()
+            await asyncio.sleep(self._poll_interval_s)
+
+    def unavailable_detail(self) -> str:
+        if self._state is EngineState.preparing:
+            estimate = TILE_BUILD_ESTIMATE_MINUTES.get(self._profile, 30)
+            elapsed = int((time.monotonic() - self._started_at) / 60)
+            remaining = max(estimate - elapsed, 1)
+            return (
+                f"Идёт первичная подготовка данных и сборка тайлов Valhalla для профиля "
+                f"'{self._profile}'. Прошло примерно {elapsed} мин, ориентировочно осталось "
+                f"~{remaining} мин. Прогресс: docker compose logs -f valhalla. "
+                "Сервис не сломан, расчёт станет доступен после готовности движка."
+            )
+        return (
+            "Роутинг-движок не отвечает, расчёт временно невозможен. "
+            f"Последняя ошибка: {self._error or 'нет данных'}. "
+            "Проверьте состояние контейнера: docker compose ps valhalla."
         )
 
 

@@ -105,10 +105,87 @@ def test_rate_limiting_can_be_disabled():
 
 
 async def test_cache_degrades_without_a_server():
-    cache = CacheService("redis://127.0.0.1:6399/0", ttl_seconds=60, timeout_s=0.05)
+    cache = CacheService(
+        "redis://127.0.0.1:6399/0",
+        ttl_seconds=60,
+        connect_timeout_ms=50,
+        breaker_threshold=1,
+    )
     await cache.connect()
     assert cache.enabled is False
     assert await cache.get("missing") is None
     await cache.set("missing", {"a": 1})
-    assert await cache.ping() is None
+    assert await cache.ping() is False
+    assert cache.healthy is False
     await cache.aclose()
+
+
+class FlakyRedis:
+    def __init__(self) -> None:
+        self.fail = True
+        self.calls = 0
+
+    async def ping(self) -> bool:
+        self.calls += 1
+        if self.fail:
+            raise ConnectionError("connection refused")
+        return True
+
+    async def get(self, key: str) -> None:
+        self.calls += 1
+        if self.fail:
+            raise ConnectionError("connection refused")
+        return None
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self.calls += 1
+        if self.fail:
+            raise ConnectionError("connection refused")
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _breaker_cache() -> tuple[CacheService, FlakyRedis]:
+    cache = CacheService(
+        "redis://127.0.0.1:6399/0",
+        ttl_seconds=60,
+        breaker_threshold=3,
+        breaker_cooldown_s=30.0,
+    )
+    client = FlakyRedis()
+    cache._client = client
+    return cache, client
+
+
+async def test_cache_breaker_opens_after_the_threshold_is_reached():
+    cache, client = _breaker_cache()
+
+    for _ in range(2):
+        assert await cache.get("key") is None
+    assert cache.breaker_open is False
+    assert cache.enabled is True
+
+    assert await cache.get("key") is None
+    assert cache.breaker_open is True
+    assert cache.enabled is False
+
+    calls_before = client.calls
+    assert await cache.get("key") is None
+    await cache.set("key", {"a": 1})
+    assert client.calls == calls_before
+
+
+async def test_cache_breaker_closes_after_a_successful_probe():
+    cache, client = _breaker_cache()
+    for _ in range(3):
+        await cache.get("key")
+    assert cache.enabled is False
+
+    cache._open_until = 0.0
+    client.fail = False
+
+    assert await cache.get("key") is None
+    assert cache.healthy is True
+    assert cache.breaker_open is False
+    assert cache.enabled is True

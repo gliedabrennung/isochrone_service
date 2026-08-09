@@ -243,12 +243,14 @@ paths:
       tags:
       - system
       summary: Readiness
-      description: 'Проверка готовности обслуживать запросы. Обращается к Valhalla, Redis и слою воды.
+      description: 'Ответ на вопрос «можно ли направлять сюда трафик». Проверяются движок, кэш, слой воды
+        и метаданные покрытия.
 
 
         Ответ 503 возвращается только при недоступности движка: без него расчёт невозможен. Недоступность
-        Redis или слоя воды переводит сервис в состояние degraded, но не приводит к отказу (см. п. 10.3
-        ТЗ).'
+        кэша, слоя воды или метаданных переводит сервис в состояние degraded с кодом 200 — сервис отдаёт
+        корректные ответы, теряя только скорость (п. 6.4 и 10.3 ТЗ). Система мониторинга различает ok
+        и degraded по телу ответа, оркестратор — по HTTP-коду.'
       operationId: ready_api_v1_ready_get
       responses:
         '200':
@@ -300,37 +302,13 @@ components:
       - hit
       - miss
       title: CacheState
-    ComponentHealth:
-      properties:
-        status:
-          type: string
-          enum:
-          - ok
-          - degraded
-          - unavailable
-          title: Status
-          description: Состояние компонента.
-          examples:
-          - ok
-        detail:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Detail
-          description: Пояснение при отклонении от нормы.
-        latency_ms:
-          anyOf:
-          - type: number
-          - type: 'null'
-          title: Latency Ms
-          description: Время ответа компонента, мс.
-      type: object
-      required:
-      - status
-      title: ComponentHealth
-      example:
-        latency_ms: 4.1
-        status: ok
+    ComponentState:
+      type: string
+      enum:
+      - ok
+      - degraded
+      - unavailable
+      title: ComponentState
     Coordinate:
       properties:
         lat:
@@ -1000,14 +978,31 @@ components:
           - degraded
           - unavailable
           title: Status
-          description: Готовность сервиса. unavailable — движок недоступен, ответ 503. degraded — сервис
-            работает, но кэш или слой воды недоступны.
+          description: Ответ на вопрос «можно ли направлять сюда трафик». ok — все компоненты в норме;
+            degraded — движок доступен, что-то из необязательных компонентов нет; unavailable — движок
+            недоступен, ответ 503. Система мониторинга различает ok и degraded по телу ответа, оркестратор
+            — по HTTP-коду.
+          examples:
+          - ok
         components:
           additionalProperties:
-            $ref: '#/components/schemas/ComponentHealth'
+            $ref: '#/components/schemas/ComponentState'
           type: object
           title: Components
-          description: Детализация по компонентам.
+          description: 'Состояние каждого компонента: engine, cache, water_layer, dataset.'
+          examples:
+          - cache: ok
+            dataset: ok
+            engine: ok
+            water_layer: ok
+        detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Detail
+          description: Пояснение к состоянию, если оно отличается от ok.
+          examples:
+          - Кэш недоступен, запросы обрабатываются без кэширования.
       type: object
       required:
       - status
@@ -1015,16 +1010,12 @@ components:
       title: ReadyResponse
       example:
         components:
-          redis:
-            latency_ms: 0.6
-            status: ok
-          valhalla:
-            latency_ms: 3.2
-            status: ok
-          water_layer:
-            detail: 1421 parts
-            status: ok
-        status: ok
+          cache: unavailable
+          dataset: ok
+          engine: ok
+          water_layer: ok
+        detail: Кэш недоступен, запросы обрабатываются без кэширования.
+        status: degraded
     TravelMode:
       type: string
       enum:

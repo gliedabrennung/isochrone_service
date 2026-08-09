@@ -25,19 +25,20 @@
 | AC-09 | Время ответа соответствует нормативам 10.2 | отчёт k6 (p50/p95/p99) | MUST | ⏳ | `make load-test` |
 | AC-10 | Нероутируемая точка и точка вне покрытия → корректные 422 | точки 6 и 7 | MUST | ⏳ | Автотесты для 422 есть, точка 6 зависит от данных |
 | AC-11 | Сервис не падает при 10 RPS × 5 мин, 5xx < 0.5 % | отчёт нагрузочного теста | MUST | ⏳ | `make load-test`, пороги зашиты в сценарий |
-| AC-12 | Остановка Redis не приводит к отказу API | `docker compose stop redis` → запрос → 200 | MUST | ⏳ | Деградация реализована и покрыта unit-тестом |
+| AC-12 | Остановка Redis не приводит к отказу API и не нарушает нормативы 10.2 | `docker compose stop redis` → прогон k6 → 200 и p95 в норме, **совместно с AC-09 одним прогоном** | MUST | ⏳ | Деградация, короткий connect-таймаут и circuit breaker покрыты unit-тестами `test_cache_degrades_without_a_server`, `test_cache_breaker_*` |
 | AC-13 | Swagger UI открывается, модели описаны, «Try it out» работает | демонстрация | MUST | ✅ | `test_swagger_ui_is_served`, `test_no_schema_is_left_undocumented` |
 | AC-14 | Клик → маркер → построение → отрисовка → скачивание GeoJSON | демонстрация | MUST | ⏳ | Проверяется на демо |
 | AC-15 | Легенда, площади и время ответа на странице | демонстрация | MUST | ⏳ | Реализовано в `web/app.js` |
 | AC-16 | `docker compose down && up` не пересобирает тайлы | демонстрация | MUST | ⏳ | Идемпотентность через `data_version` |
 | AC-17 | Все образы зафиксированы по тегу, `latest` отсутствует | ревью compose | MUST | ✅ | Проверяется job `compose` в CI |
-| AC-18 | Наружу опубликован только порт web | `docker compose ps` | MUST | ✅ | Проверяется job `compose` в CI |
+| AC-18 | Наружу опубликован только порт `web` | автопроверка: шаг 7 `scripts/smoke_test.sh` и job `compose` в CI | MUST | ✅ | Dev-профиль вынесен в `docker-compose.dev.yml`, автоматически не подхватывается |
 | AC-19 | Логи структурированы, содержат `request_id` и `duration_ms` | `docker compose logs api` | MUST | ⏳ | structlog JSON, поля из п. 10.5 |
 | AC-20 | Раздел «Известные ограничения» заполнен содержательно | ревью | MUST | ✅ | README, раздел 10 |
 | AC-21 | CI зелёный, покрытие бизнес-логики ≥ 70 % | отчёт CI | MUST | ✅ | Порог зашит в `--cov-fail-under=70`, фактически ~90 % |
 | AC-22 | Permalink восстанавливает состояние демо-страницы | демонстрация | SHOULD | ⏳ | Состояние в `location.hash` |
 | AC-23 | `/metrics` отдаёт метрики Prometheus | `curl` | SHOULD | ✅ | `test_metrics_are_exposed_in_prometheus_format` |
 | AC-24 | Работоспособность на macOS arm64 | демонстрация или протокол | SHOULD | ⏳ | Образ Valhalla имеет arm64-манифест, требуется прогон |
+| AC-25 | Во время первичной сборки тайлов запрос через `web` → `503 ENGINE_UNAVAILABLE` с текстом о подготовке данных, не 502/500/таймаут | `docker volume rm` → `docker compose up -d` → немедленный `curl` через 8080 | MUST | ⏳ | `EngineMonitor` различает `preparing` и `unavailable`; unit-тесты `test_monitor_*`, `test_isochrone_returns_503_without_calling_an_engine_that_is_not_ready` |
 
 ## 2. Геометрические инварианты (раздел 13.2 ТЗ)
 

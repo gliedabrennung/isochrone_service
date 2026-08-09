@@ -26,6 +26,12 @@ FILL_OPACITY = 0.25
 COORDINATE_PRECISION = 6
 MIN_MEANINGFUL_AREA_KM2 = 0.001
 
+TILE_BUILD_ESTIMATE_MINUTES: dict[str, int] = {
+    "almaty": 10,
+    "almaty-region": 25,
+    "kazakhstan": 90,
+}
+
 COSTING_BY_MODE = {
     "pedestrian": "pedestrian",
     "bicycle": "bicycle",
@@ -63,10 +69,15 @@ class Settings(BaseSettings):
 
     valhalla_url: str = "http://valhalla:8002"
     engine_timeout_s: float = 10.0
+    engine_connect_timeout_s: float = 1.0
+    engine_poll_interval_s: float = Field(default=5.0, gt=0)
 
     redis_url: str = "redis://redis:6379/0"
     cache_ttl_seconds: int = 604800
     cache_coord_precision: int = 4
+    redis_connect_timeout_ms: int = Field(default=150, gt=0)
+    redis_breaker_threshold: int = Field(default=3, ge=1)
+    redis_breaker_cooldown_s: float = Field(default=30.0, gt=0)
 
     max_contours: int = Field(default=4, ge=1, le=8)
     max_contour_minutes: int = Field(default=60, ge=1, le=120)

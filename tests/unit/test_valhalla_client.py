@@ -1,9 +1,13 @@
+import asyncio
+
 import httpx
 import pytest
 import respx
 
 from app.core.errors import ProblemError
 from app.services.valhalla import (
+    EngineMonitor,
+    EngineState,
     ValhallaClient,
     build_isochrone_payload,
     parse_isochrone_response,
@@ -200,3 +204,60 @@ async def test_unreadable_engine_body_maps_to_engine_unavailable(client):
         with pytest.raises(ProblemError) as info:
             await client.isochrone({})
     assert info.value.code == "ENGINE_UNAVAILABLE"
+
+
+class FlakyEngine:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls = 0
+
+    async def status(self) -> dict[str, str]:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return {"version": "3.5.1"}
+
+
+async def test_monitor_starts_in_preparing_until_the_engine_answers():
+    engine = FlakyEngine(ConnectionRefusedError("connection refused"))
+    monitor = EngineMonitor(engine, poll_interval_s=60)
+
+    assert monitor.state is EngineState.preparing
+    assert await monitor.refresh() is EngineState.preparing
+    assert monitor.ready is False
+
+    detail = monitor.unavailable_detail()
+    assert "сборка тайлов" in detail
+    assert "мин" in detail
+
+
+async def test_monitor_reports_a_failure_only_after_the_engine_was_ready():
+    engine = FlakyEngine()
+    monitor = EngineMonitor(engine, poll_interval_s=60)
+
+    assert await monitor.refresh() is EngineState.ready
+    assert monitor.ready is True
+
+    engine.error = ConnectionRefusedError("connection refused")
+    assert await monitor.refresh() is EngineState.unavailable
+
+    detail = monitor.unavailable_detail()
+    assert "сборка тайлов" not in detail
+    assert "ConnectionRefusedError" in monitor.error
+
+
+async def test_monitor_recovers_and_stops_its_background_task():
+    engine = FlakyEngine(ConnectionRefusedError("connection refused"))
+    monitor = EngineMonitor(engine, poll_interval_s=0.01)
+    monitor.start()
+    await asyncio.sleep(0.03)
+    assert engine.calls >= 1
+
+    engine.error = None
+    await asyncio.sleep(0.03)
+    assert monitor.ready is True
+
+    await monitor.stop()
+    calls_after_stop = engine.calls
+    await asyncio.sleep(0.03)
+    assert engine.calls == calls_after_stop

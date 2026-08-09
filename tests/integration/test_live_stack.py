@@ -44,7 +44,7 @@ def test_health(client):
 def test_ready(client):
     response = client.get("/ready")
     assert response.status_code == 200, response.text
-    assert response.json()["components"]["valhalla"]["status"] == "ok"
+    assert response.json()["components"]["engine"] == "ok"
 
 
 def test_meta_reports_real_osm_timestamp(client):
