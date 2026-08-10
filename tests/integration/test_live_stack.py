@@ -102,9 +102,11 @@ def test_auto_covers_more_than_bicycle_and_pedestrian(client):
 
 
 def test_cache_hit_is_fast_and_identical(client):
-    lat = round(43.2389 + random.randint(0, 20) * 0.0001, 4)
-    first = isochrone(client, lat=lat, contours=[12, 24])
-    second = isochrone(client, lat=lat, contours=[12, 24])
+    lat = round(43.2389 + random.randint(0, 40) * 0.0001, 4)
+    denoise = round(0.1 + random.randint(0, 2000) * 0.0001, 4)
+    options = {"denoise": denoise}
+    first = isochrone(client, lat=lat, contours=[12, 24], options=options)
+    second = isochrone(client, lat=lat, contours=[12, 24], options=options)
     assert first.headers["X-Cache"] == "MISS"
     assert second.headers["X-Cache"] == "HIT"
     assert second.json()["metadata"]["duration_ms"] <= 200
