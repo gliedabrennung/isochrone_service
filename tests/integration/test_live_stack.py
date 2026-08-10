@@ -1,5 +1,6 @@
 import json
 import os
+import random
 from pathlib import Path
 
 import httpx
@@ -9,6 +10,7 @@ from shapely.geometry import Point, shape
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8080")
 API = f"{BASE_URL}/api/v1"
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+COORDINATE_GRID_DEG = 1e-6
 
 pytestmark = [
     pytest.mark.integration,
@@ -99,8 +101,9 @@ def test_auto_covers_more_than_bicycle_and_pedestrian(client):
 
 
 def test_cache_hit_is_fast_and_identical(client):
-    first = isochrone(client, contours=[12, 24])
-    second = isochrone(client, contours=[12, 24])
+    lat = round(43.2389 + random.randint(0, 20) * 0.0001, 4)
+    first = isochrone(client, lat=lat, contours=[12, 24])
+    second = isochrone(client, lat=lat, contours=[12, 24])
     assert first.headers["X-Cache"] == "MISS"
     assert second.headers["X-Cache"] == "HIT"
     assert second.json()["metadata"]["duration_ms"] <= 200
@@ -117,16 +120,43 @@ def test_rings_do_not_overlap(client):
             assert shapes[left].intersection(shapes[right]).area == pytest.approx(0.0, abs=1e-9)
 
 
+def water_variants(client, control_points):
+    origin = control_points[2]
+    kept = isochrone(
+        client,
+        lat=origin["lat"],
+        lon=origin["lon"],
+        contours=[20],
+        options={"exclude_water": False},
+    ).json()
+    cut = isochrone(
+        client,
+        lat=origin["lat"],
+        lon=origin["lon"],
+        contours=[20],
+        options={"exclude_water": True},
+    ).json()
+    return kept, cut
+
+
 def test_sayran_lake_is_cut_out(client, control_points):
-    point = control_points[2]
-    body = isochrone(client, lat=point["lat"], lon=point["lon"], contours=[20]).json()
-    geometry = shape(body["features"][0]["geometry"])
-    lake = shape(
-        json.loads((FIXTURES / "data" / "water.geojson").read_text(encoding="utf-8"))["features"][
-            0
-        ]["geometry"]
-    )
-    assert geometry.intersection(lake).area <= lake.area * 0.05
+    middle = control_points[8]
+    kept, cut = water_variants(client, control_points)
+    lake_point = Point(middle["lon"], middle["lat"])
+
+    assert shape(kept["features"][0]["geometry"]).contains(lake_point)
+    assert not shape(cut["features"][0]["geometry"]).contains(lake_point)
+
+
+def test_excluding_water_only_removes_area_and_keeps_the_geometry_valid(client, control_points):
+    kept, cut = water_variants(client, control_points)
+    kept_geometry = shape(kept["features"][0]["geometry"])
+    cut_geometry = shape(cut["features"][0]["geometry"])
+
+    assert cut_geometry.is_valid
+    assert cut_geometry.area < kept_geometry.area
+    outside = cut_geometry.difference(kept_geometry.buffer(COORDINATE_GRID_DEG))
+    assert outside.area == pytest.approx(0.0, abs=1e-9)
 
 
 def test_point_outside_coverage(client, control_points):
@@ -134,6 +164,26 @@ def test_point_outside_coverage(client, control_points):
     response = isochrone(client, lat=point["lat"], lon=point["lon"])
     assert response.status_code == 422
     assert response.json()["code"] == "POINT_OUT_OF_COVERAGE"
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_the_mountain_massif_stays_outside_the_isochrone(client, control_points):
+    medeu = control_points[4]
+    ridge = control_points[9]
+    body = isochrone(client, lat=medeu["lat"], lon=medeu["lon"], contours=[60], mode="auto").json()
+    geometry = shape(body["features"][0]["geometry"])
+
+    assert geometry.is_valid
+    assert not geometry.contains(Point(ridge["lon"], ridge["lat"]))
+
+
+def test_point_inside_coverage_but_off_the_graph(client, control_points):
+    point = control_points[9]
+    response = isochrone(client, lat=point["lat"], lon=point["lon"])
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "POINT_NOT_ROUTABLE"
+    assert body["snap_distance_m"] > 500
     assert response.headers["content-type"].startswith("application/problem+json")
 
 

@@ -5,10 +5,15 @@ BASE_URL="${BASE_URL:-http://localhost:8080}"
 API="${BASE_URL}/api/v1"
 LAT="${SMOKE_LAT:-43.238949}"
 LON="${SMOKE_LON:-76.889709}"
+UNROUTABLE_LAT="${SMOKE_UNROUTABLE_LAT:-43.06}"
+UNROUTABLE_LON="${SMOKE_UNROUTABLE_LON:-77.05}"
 READY_TIMEOUT_S="${READY_TIMEOUT_S:-60}"
 
 PASSED=0
 FAILED=0
+
+BODY="$(mktemp -t smoke_body.XXXXXXXX.json)"
+trap 'rm -f "$BODY"' EXIT
 
 green() { printf '\033[32m%s\033[0m\n' "$1"; }
 red() { printf '\033[31m%s\033[0m\n' "$1"; }
@@ -17,15 +22,24 @@ pass() { PASSED=$((PASSED + 1)); green "  PASS  $1"; }
 fail() { FAILED=$((FAILED + 1)); red "  FAIL  $1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
 
 http_status() {
-  curl -s -o /tmp/smoke_body.json -w '%{http_code}' "$@"
+  local status exit_code
+  : > "$BODY"
+  status="$(curl -s -o "$BODY" -w '%{http_code}' "$@")"
+  exit_code=$?
+  if [ "$exit_code" -ne 0 ]; then
+    printf 'curl-error-%s\n' "$exit_code"
+    return 0
+  fi
+  printf '%s\n' "$status"
 }
 
 json_field() {
-  python3 - "$@" <<'PY' 2>/dev/null
+  SMOKE_BODY="$BODY" python3 - "$@" <<'PY' 2>/dev/null
 import json
+import os
 import sys
 
-with open("/tmp/smoke_body.json", encoding="utf-8") as handle:
+with open(os.environ["SMOKE_BODY"], encoding="utf-8") as handle:
     data = json.load(handle)
 for key in sys.argv[1:]:
     data = data[int(key)] if key.lstrip("-").isdigit() else data[key]
@@ -47,28 +61,28 @@ wait_for_ready() {
 
 echo "smoke test against ${BASE_URL}"
 
-echo "[1/7] liveness"
+echo "[1/8] liveness"
 if [ "$(http_status "${API}/health")" = "200" ]; then
   pass "GET /health -> 200"
 else
-  fail "GET /health" "$(cat /tmp/smoke_body.json 2>/dev/null)"
+  fail "GET /health" "$(cat "$BODY" 2>/dev/null)"
 fi
 
-echo "[2/7] readiness"
+echo "[2/8] readiness"
 if wait_for_ready; then
   pass "GET /ready -> 200"
 else
   fail "GET /ready" "движок не поднялся за ${READY_TIMEOUT_S} с, проверьте: docker compose logs -f valhalla"
 fi
 
-echo "[3/7] metadata"
+echo "[3/8] metadata"
 if [ "$(http_status "${API}/meta")" = "200" ]; then
   pass "GET /meta -> 200 (osm $(json_field osm_data_timestamp))"
 else
   fail "GET /meta"
 fi
 
-echo "[4/7] расчёт по трём режимам"
+echo "[4/8] расчёт по трём режимам"
 for MODE in pedestrian bicycle auto; do
   STATUS=$(http_status -X POST "${API}/isochrone" \
     -H 'Content-Type: application/json' \
@@ -77,11 +91,11 @@ for MODE in pedestrian bicycle auto; do
   if [ "$STATUS" = "200" ] && [ "$FEATURES" = "3" ]; then
     pass "POST /isochrone ${MODE} -> 200, 3 features, $(json_field metadata duration_ms) ms"
   else
-    fail "POST /isochrone ${MODE}" "status=${STATUS} $(head -c 300 /tmp/smoke_body.json)"
+    fail "POST /isochrone ${MODE}" "status=${STATUS} $(head -c 300 "$BODY")"
   fi
 done
 
-echo "[5/7] негативный сценарий: точка вне покрытия"
+echo "[5/8] негативный сценарий: точка вне покрытия"
 STATUS=$(http_status -X POST "${API}/isochrone" \
   -H 'Content-Type: application/json' \
   -d '{"lat":51.1605,"lon":71.4704,"contours":[10],"mode":"auto"}')
@@ -92,7 +106,18 @@ else
   fail "POST /isochrone вне bbox" "status=${STATUS} code=${CODE}"
 fi
 
-echo "[6/7] негативный сценарий: невалидные параметры"
+echo "[6/8] негативный сценарий: нероутируемая точка"
+STATUS=$(http_status -X POST "${API}/isochrone" \
+  -H 'Content-Type: application/json' \
+  -d "{\"lat\":${UNROUTABLE_LAT},\"lon\":${UNROUTABLE_LON},\"contours\":[10],\"mode\":\"pedestrian\"}")
+CODE=$(json_field code)
+if [ "$STATUS" = "422" ] && [ "$CODE" = "POINT_NOT_ROUTABLE" ]; then
+  pass "POST /isochrone в горах -> 422 POINT_NOT_ROUTABLE, снап $(json_field snap_distance_m) м"
+else
+  fail "POST /isochrone в горах" "status=${STATUS} code=${CODE}"
+fi
+
+echo "[7/8] негативный сценарий: невалидные параметры"
 STATUS=$(http_status -X POST "${API}/isochrone" \
   -H 'Content-Type: application/json' \
   -d "{\"lat\":${LAT},\"lon\":${LON},\"contours\":[61],\"mode\":\"auto\"}")
@@ -103,7 +128,7 @@ else
   fail "POST /isochrone contours=[61]" "status=${STATUS} code=${CODE}"
 fi
 
-echo "[7/7] наружу опубликован только порт web (AC-18)"
+echo "[8/8] наружу опубликован только порт web (AC-18)"
 COMPOSE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${SMOKE_SKIP_PORT_CHECK:-0}" = "1" ]; then
   echo "  SKIP  проверка портов отключена через SMOKE_SKIP_PORT_CHECK=1"
