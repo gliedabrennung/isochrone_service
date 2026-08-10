@@ -14,13 +14,13 @@ WATER_INCLUDE_CANALS="${WATER_INCLUDE_CANALS:-true}"
 log() { printf '%s prepare-water %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 
 FILTERS=(
-  w/natural=water r/natural=water
-  w/waterway=riverbank r/waterway=riverbank
-  w/landuse=reservoir,basin r/landuse=reservoir,basin
-  w/waterway=river,stream
+  "w/natural=water" "r/natural=water"
+  "w/waterway=riverbank" "r/waterway=riverbank"
+  "w/landuse=reservoir,basin" "r/landuse=reservoir,basin"
+  "w/waterway=river,stream"
 )
 if [ "$WATER_INCLUDE_CANALS" = "true" ]; then
-  FILTERS+=(w/waterway=canal)
+  FILTERS+=("w/waterway=canal")
 fi
 
 log "filtering water features from $PBF_FOR_WATER"

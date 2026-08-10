@@ -18,4 +18,5 @@ htmlcov/
 node_modules/
 load/results/
 .claude/
+.idea/
 .DS_Store
