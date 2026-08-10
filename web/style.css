@@ -16,6 +16,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -356,10 +360,6 @@ input[type="range"] {
   font-size: 12px;
   pointer-events: none;
   z-index: 2;
-}
-
-.map-hint[hidden] {
-  display: none;
 }
 
 .marker {
