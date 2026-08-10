@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 import pytest
 
 from app.core.errors import ERROR_CATALOG, ProblemError, problem_payload
@@ -124,6 +127,7 @@ class FlakyRedis:
     def __init__(self) -> None:
         self.fail = True
         self.calls = 0
+        self.block: asyncio.Event | None = None
 
     async def ping(self) -> bool:
         self.calls += 1
@@ -133,6 +137,8 @@ class FlakyRedis:
 
     async def get(self, key: str) -> None:
         self.calls += 1
+        if self.block is not None:
+            await self.block.wait()
         if self.fail:
             raise ConnectionError("connection refused")
         return None
@@ -174,6 +180,44 @@ async def test_cache_breaker_opens_after_the_threshold_is_reached():
     assert await cache.get("key") is None
     await cache.set("key", {"a": 1})
     assert client.calls == calls_before
+
+
+async def test_cache_breaker_admits_a_single_probe_after_the_cooldown():
+    cache, client = _breaker_cache()
+    for _ in range(3):
+        await cache.get("key")
+    assert cache.breaker_open is True
+
+    cache._open_until = time.monotonic() - 1
+    client.block = asyncio.Event()
+
+    probe = asyncio.create_task(cache.get("key"))
+    await asyncio.sleep(0)
+    calls_in_flight = client.calls
+
+    assert await cache.get("key") is None
+    await cache.set("key", {"a": 1})
+    assert client.calls == calls_in_flight
+
+    client.block.set()
+    assert await probe is None
+    assert cache.breaker_open is True
+
+
+async def test_cache_breaker_reopens_for_a_new_probe_after_a_failed_one():
+    cache, client = _breaker_cache()
+    for _ in range(3):
+        await cache.get("key")
+
+    cache._open_until = time.monotonic() - 1
+    calls_before = client.calls
+    assert await cache.get("key") is None
+    assert client.calls == calls_before + 1
+    assert cache.breaker_open is True
+
+    cache._open_until = time.monotonic() - 1
+    assert await cache.get("key") is None
+    assert client.calls == calls_before + 2
 
 
 async def test_cache_breaker_closes_after_a_successful_probe():

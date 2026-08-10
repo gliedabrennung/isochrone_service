@@ -4,9 +4,11 @@ import json
 import time
 from typing import Any
 
+import orjson
 import redis.asyncio as redis
 from redis.exceptions import RedisError
 
+from app import __version__
 from app.core.logging import get_logger
 from app.core.metrics import CACHE_ERRORS
 
@@ -40,6 +42,7 @@ def make_cache_key(
         bool(exclude_water),
         data_version,
         departure_time,
+        __version__,
     ]
     digest = hashlib.sha1(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -65,6 +68,7 @@ class CacheService:
         self._failures = 0
         self._open_until = 0.0
         self._healthy = True
+        self._probing = False
 
     async def connect(self) -> None:
         try:
@@ -93,6 +97,18 @@ class CacheService:
             return False
         return not self._open_until or time.monotonic() >= self._open_until
 
+    def _acquire(self) -> bool:
+        if self._client is None:
+            return False
+        if not self._open_until:
+            return True
+        if time.monotonic() < self._open_until:
+            return False
+        if self._probing:
+            return False
+        self._probing = True
+        return True
+
     @property
     def healthy(self) -> bool:
         return self._client is not None and self._healthy
@@ -103,6 +119,7 @@ class CacheService:
 
     def _record_failure(self, operation: str, error: str) -> None:
         CACHE_ERRORS.labels(operation=operation).inc()
+        self._probing = False
         self._failures += 1
         if self._failures >= self._breaker_threshold:
             self._open_until = time.monotonic() + self._breaker_cooldown_s
@@ -118,6 +135,7 @@ class CacheService:
             )
 
     def _record_success(self) -> None:
+        self._probing = False
         self._failures = 0
         self._open_until = 0.0
         if not self._healthy:
@@ -136,7 +154,7 @@ class CacheService:
         return True
 
     async def get(self, key: str) -> dict[str, Any] | None:
-        if not self.enabled:
+        if not self._acquire():
             return None
         try:
             raw = await self._client.get(key)
@@ -147,20 +165,16 @@ class CacheService:
         if not raw:
             return None
         try:
-            return json.loads(raw)
-        except ValueError:
+            return orjson.loads(raw)
+        except orjson.JSONDecodeError:
             logger.warning("cache_payload_corrupted", key=key)
             return None
 
     async def set(self, key: str, payload: dict[str, Any]) -> None:
-        if not self.enabled:
+        if not self._acquire():
             return
         try:
-            await self._client.set(
-                key,
-                json.dumps(payload, separators=(",", ":")),
-                ex=self.ttl_seconds,
-            )
+            await self._client.set(key, orjson.dumps(payload), ex=self.ttl_seconds)
         except (RedisError, OSError) as exc:
             self._record_failure("set", str(exc))
             return

@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -71,6 +72,11 @@ class Settings(BaseSettings):
     engine_timeout_s: float = 10.0
     engine_connect_timeout_s: float = 1.0
     engine_poll_interval_s: float = Field(default=5.0, gt=0)
+    engine_failure_threshold: int = Field(default=3, ge=1)
+    engine_warmup_connections: int = Field(default=8, ge=0)
+
+    geometry_workers: int = Field(default=0, ge=0)
+    water_simplify_tolerance_deg: float = Field(default=3e-5, ge=0)
 
     redis_url: str = "redis://redis:6379/0"
     cache_ttl_seconds: int = 604800
@@ -129,6 +135,12 @@ class Settings(BaseSettings):
         if period not in divisor:
             raise ValueError(f"unsupported RATE_LIMIT period '{period}'")
         return float(amount) / divisor[period]
+
+    @property
+    def geometry_worker_count(self) -> int:
+        if self.geometry_workers > 0:
+            return self.geometry_workers
+        return max((os.cpu_count() or 1) - 2, 2)
 
     @property
     def water_path(self) -> Path:

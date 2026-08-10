@@ -1,5 +1,7 @@
 import time
+from typing import Any
 
+import orjson
 import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
@@ -25,6 +27,9 @@ router = APIRouter(tags=["isochrone"])
 
 class GeoJSONResponse(JSONResponse):
     media_type = GEOJSON_MEDIA_TYPE
+
+    def render(self, content: Any) -> bytes:
+        return orjson.dumps(content, option=orjson.OPT_SERIALIZE_NUMPY)
 
 
 def _problem_doc(description: str) -> dict:

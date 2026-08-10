@@ -79,6 +79,20 @@ def test_fallback_bbox_rejects_malformed_value():
         _ = settings.fallback_bbox
 
 
+def test_geometry_worker_count_honours_an_explicit_value():
+    assert Settings(geometry_workers=3).geometry_worker_count == 3
+
+
+def test_geometry_worker_count_leaves_headroom_for_the_event_loop(monkeypatch):
+    monkeypatch.setattr("app.config.os.cpu_count", lambda: 8)
+    assert Settings(geometry_workers=0).geometry_worker_count == 6
+
+
+def test_geometry_worker_count_never_drops_below_two(monkeypatch):
+    monkeypatch.setattr("app.config.os.cpu_count", lambda: 1)
+    assert Settings(geometry_workers=0).geometry_worker_count == 2
+
+
 def test_unknown_profile_is_rejected():
     with pytest.raises(ValidationError):
         Settings(osm_profile="mars")

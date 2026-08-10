@@ -89,7 +89,7 @@ services:
       data-prep:
         condition: service_completed_successfully
       redis:
-        condition: service_healthy
+        condition: service_started
       valhalla:
         condition: service_started
     environment:
@@ -103,6 +103,10 @@ services:
       ENGINE_TIMEOUT_S: ${ENGINE_TIMEOUT_S:-10}
       ENGINE_CONNECT_TIMEOUT_S: ${ENGINE_CONNECT_TIMEOUT_S:-1}
       ENGINE_POLL_INTERVAL_S: ${ENGINE_POLL_INTERVAL_S:-5}
+      ENGINE_FAILURE_THRESHOLD: ${ENGINE_FAILURE_THRESHOLD:-3}
+      ENGINE_WARMUP_CONNECTIONS: ${ENGINE_WARMUP_CONNECTIONS:-8}
+      GEOMETRY_WORKERS: ${GEOMETRY_WORKERS:-0}
+      WATER_SIMPLIFY_TOLERANCE_DEG: ${WATER_SIMPLIFY_TOLERANCE_DEG:-0.00003}
       MAX_CONTOURS: ${MAX_CONTOURS:-4}
       MAX_CONTOUR_MINUTES: ${MAX_CONTOUR_MINUTES:-60}
       MIN_CONTOUR_MINUTES: ${MIN_CONTOUR_MINUTES:-5}

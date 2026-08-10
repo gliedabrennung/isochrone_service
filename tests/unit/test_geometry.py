@@ -152,6 +152,47 @@ def test_water_index_subtracts_intersecting_polygons():
     assert result.intersection(lake).area == pytest.approx(0.0)
 
 
+def test_water_index_subtracts_several_disjoint_parts_at_once():
+    parts = [box(0.1, 0.1, 0.2, 0.2), box(0.4, 0.4, 0.6, 0.6), box(0.8, 0.1, 0.9, 0.3)]
+    index = WaterIndex(parts)
+    result = index.subtract(box(0, 0, 1, 1))
+    expected = 1.0 - sum(part.area for part in parts)
+    assert result.area == pytest.approx(expected)
+    assert result.is_valid
+    for part in parts:
+        assert result.intersection(part).area == pytest.approx(0.0)
+
+
+def test_water_index_flattens_multipolygon_parts():
+    index = WaterIndex([MultiPolygon([box(0.1, 0.1, 0.2, 0.2), box(0.5, 0.5, 0.7, 0.7)])])
+    assert index.part_count == 2
+    result = index.subtract(box(0, 0, 1, 1))
+    assert result.area == pytest.approx(1.0 - 0.01 - 0.04)
+
+
+def test_water_index_simplifies_the_layer_on_load(tmp_path):
+    path = tmp_path / "water.geojson"
+    ring = [[0.0, 0.0], [1.0, 0.0], [1.0, 0.5], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]
+    payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {},
+                "geometry": {"type": "Polygon", "coordinates": [ring]},
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    detailed = WaterIndex.from_file(path)
+    simplified = WaterIndex.from_file(path, simplify_tolerance_deg=0.01)
+
+    assert len(detailed._parts[0].exterior.coords) == 6
+    assert len(simplified._parts[0].exterior.coords) == 5
+    assert simplified._parts[0].area == pytest.approx(1.0)
+
+
 def test_water_index_returns_input_when_nothing_intersects():
     index = WaterIndex([box(10, 10, 11, 11)])
     original = box(0, 0, 1, 1)

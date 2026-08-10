@@ -122,8 +122,13 @@ def point_in_bbox(lat: float, lon: float, bbox: tuple[float, float, float, float
 
 class WaterIndex:
     def __init__(self, parts: list[BaseGeometry]) -> None:
-        self._parts = parts
-        self._tree = STRtree(parts) if parts else None
+        self._parts = [
+            geometry
+            for part in parts
+            for geometry in (part.geoms if part.geom_type == "MultiPolygon" else (part,))
+            if not geometry.is_empty
+        ]
+        self._tree = STRtree(self._parts) if self._parts else None
 
     @property
     def part_count(self) -> int:
@@ -138,7 +143,7 @@ class WaterIndex:
         return cls([])
 
     @classmethod
-    def from_file(cls, path: Path) -> "WaterIndex":
+    def from_file(cls, path: Path, simplify_tolerance_deg: float = 0.0) -> "WaterIndex":
         if not path.exists():
             logger.warning("water_layer_missing", path=str(path))
             return cls.empty()
@@ -155,6 +160,8 @@ class WaterIndex:
             if not geometry:
                 continue
             parsed = normalize(shape(geometry))
+            if simplify_tolerance_deg > 0 and not parsed.is_empty:
+                parsed = normalize(shapely.simplify(parsed, simplify_tolerance_deg))
             if parsed.is_empty:
                 continue
             if isinstance(parsed, MultiPolygon):
@@ -162,7 +169,12 @@ class WaterIndex:
             else:
                 parts.append(parsed)
 
-        logger.info("water_layer_loaded", path=str(path), parts=len(parts))
+        logger.info(
+            "water_layer_loaded",
+            path=str(path),
+            parts=len(parts),
+            simplify_tolerance_deg=simplify_tolerance_deg,
+        )
         return cls(parts)
 
     def subtract(self, geometry: BaseGeometry) -> BaseGeometry:
@@ -171,5 +183,5 @@ class WaterIndex:
         candidates = self._tree.query(geometry, predicate="intersects")
         if len(candidates) == 0:
             return geometry
-        water = unary_union([self._parts[index] for index in candidates])
+        water = MultiPolygon([self._parts[index] for index in candidates])
         return normalize(geometry.difference(water))

@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+from anyio import CapacityLimiter
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -74,7 +75,11 @@ async def lifespan(app: FastAPI):
 
     app.state.settings = settings
     app.state.dataset_meta = load_dataset_meta(settings)
-    app.state.water = await asyncio.to_thread(WaterIndex.from_file, settings.water_path)
+    app.state.water = await asyncio.to_thread(
+        WaterIndex.from_file,
+        settings.water_path,
+        settings.water_simplify_tolerance_deg,
+    )
 
     app.state.cache = CacheService(
         settings.redis_url,
@@ -94,9 +99,13 @@ async def lifespan(app: FastAPI):
         app.state.engine,
         poll_interval_s=settings.engine_poll_interval_s,
         profile=settings.osm_profile,
+        failure_threshold=settings.engine_failure_threshold,
     )
     await app.state.engine_monitor.refresh()
+    await app.state.engine.warmup(settings.engine_warmup_connections)
     app.state.engine_monitor.start()
+
+    app.state.geometry_limiter = CapacityLimiter(settings.geometry_worker_count)
 
     app.state.isochrone_service = IsochroneService(
         settings=settings,
@@ -105,11 +114,13 @@ async def lifespan(app: FastAPI):
         water=app.state.water,
         meta=app.state.dataset_meta,
         monitor=app.state.engine_monitor,
+        limiter=app.state.geometry_limiter,
     )
 
     logger.info(
         "service_started",
         water_parts=app.state.water.part_count,
+        geometry_workers=settings.geometry_worker_count,
         data_version=app.state.dataset_meta.data_version,
         osm_data_timestamp=app.state.dataset_meta.osm_data_timestamp,
     )

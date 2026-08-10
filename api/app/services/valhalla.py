@@ -29,6 +29,7 @@ ENGINE_ERROR_MAP: dict[int, str] = {
 }
 
 _POLYGON_TYPES = ("Polygon", "MultiPolygon")
+_POINT_TYPES = ("Point", "MultiPoint")
 
 
 class ValhallaClient:
@@ -45,7 +46,8 @@ class ValhallaClient:
             timeout=httpx.Timeout(timeout_s, connect=connect_timeout_s),
             limits=httpx.Limits(
                 max_connections=max_connections,
-                max_keepalive_connections=max_connections // 2 or 1,
+                max_keepalive_connections=max_connections,
+                keepalive_expiry=60.0,
             ),
             headers={"User-Agent": "isochrone-service/1.0"},
         )
@@ -67,6 +69,16 @@ class ValhallaClient:
             self._version = version
         return payload
 
+    async def warmup(self, connections: int) -> int:
+        if connections <= 0:
+            return 0
+        results = await asyncio.gather(
+            *(self.status() for _ in range(connections)), return_exceptions=True
+        )
+        established = sum(1 for result in results if not isinstance(result, BaseException))
+        logger.info("engine_pool_warmed", requested=connections, established=established)
+        return established
+
     async def version(self) -> str:
         if self._version:
             return self._version
@@ -76,17 +88,35 @@ class ValhallaClient:
             return "unknown"
         return self._version or "unknown"
 
+    async def _post_isochrone(self, payload: dict[str, Any]) -> httpx.Response:
+        try:
+            return await self._client.post("/isochrone", json=payload)
+        except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+            logger.warning("engine_connect_retry", error_type=type(exc).__name__, error=str(exc))
+            return await self._client.post("/isochrone", json=payload)
+
     async def isochrone(self, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         started = time.perf_counter()
         try:
-            response = await self._client.post("/isochrone", json=payload)
+            response = await self._post_isochrone(payload)
         except httpx.TimeoutException as exc:
+            logger.warning(
+                "engine_timeout",
+                timeout_type=type(exc).__name__,
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+            )
             raise ProblemError(
                 "ENGINE_TIMEOUT",
                 "Роутинг-движок не ответил в отведённое время. "
                 "Уменьшите число или величину контуров.",
             ) from exc
         except httpx.HTTPError as exc:
+            logger.warning(
+                "engine_transport_error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+            )
             raise ProblemError(
                 "ENGINE_UNAVAILABLE",
                 "Роутинг-движок недоступен. Возможно, ещё не завершена первичная сборка тайлов.",
@@ -142,10 +172,13 @@ class EngineMonitor:
         client: ValhallaClient,
         poll_interval_s: float,
         profile: str = "almaty",
+        failure_threshold: int = 3,
     ) -> None:
         self.client = client
         self._poll_interval_s = poll_interval_s
         self._profile = profile
+        self.failure_threshold = max(failure_threshold, 1)
+        self._failures = 0
         self._state = EngineState.preparing
         self._error: str | None = None
         self._started_at = time.monotonic()
@@ -167,11 +200,13 @@ class EngineMonitor:
         previous = self._state
         try:
             await self.client.status()
+            self._failures = 0
             self._state = EngineState.ready
             self._error = None
         except Exception as exc:
+            self._failures += 1
             self._error = f"{type(exc).__name__}: {exc}"
-            if previous is not EngineState.preparing:
+            if previous is not EngineState.preparing and self._failures >= self.failure_threshold:
                 self._state = EngineState.unavailable
 
         if self._state is not previous:
@@ -179,6 +214,7 @@ class EngineMonitor:
                 "engine_state_changed",
                 previous=previous.value,
                 current=self._state.value,
+                failures=self._failures,
                 error=self._error,
             )
         return self._state
@@ -256,9 +292,11 @@ def parse_isochrone_response(
         properties = feature.get("properties") or {}
         geometry_type = geometry.get("type")
 
-        if geometry_type == "Point":
+        if geometry_type in _POINT_TYPES:
             if properties.get("type") == "snapped":
                 coordinates = geometry.get("coordinates") or []
+                if geometry_type == "MultiPoint":
+                    coordinates = coordinates[0] if coordinates else []
                 if len(coordinates) >= 2:
                     snapped = (float(coordinates[1]), float(coordinates[0]))
             continue

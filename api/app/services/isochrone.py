@@ -2,6 +2,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+from anyio import CapacityLimiter, to_thread
 from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
 
@@ -67,6 +68,7 @@ class IsochroneService:
         water: WaterIndex,
         meta: DatasetMeta,
         monitor: EngineMonitor | None = None,
+        limiter: CapacityLimiter | None = None,
     ) -> None:
         self.settings = settings
         self.engine = engine
@@ -74,6 +76,7 @@ class IsochroneService:
         self.water = water
         self.meta = meta
         self.monitor = monitor
+        self.limiter = limiter
 
     def resolve_smoothing(self, request: IsochroneRequest) -> tuple[float, int]:
         denoise_default, generalize_default = smoothing_defaults(request.max_contour)
@@ -148,10 +151,41 @@ class IsochroneService:
         raw, engine_ms = await self.engine.isochrone(engine_payload)
         ENGINE_DURATION.labels(mode=request.mode.value).observe(engine_ms / 1000)
 
+        engine_version = await self.engine.version()
+        stable, snap_distance = await to_thread.run_sync(
+            self._build_stable,
+            request,
+            raw,
+            request_id,
+            engine_version,
+            engine_ms,
+            denoise,
+            generalize,
+            limiter=self.limiter,
+        )
+
+        await self.cache.set(cache_key, stable)
+        payload = self._finalize(stable, request_id, started, cache_state="miss")
+        return IsochroneResult(
+            payload=payload,
+            cache_hit=False,
+            engine_ms=engine_ms,
+            snap_distance_m=snap_distance,
+        )
+
+    def _build_stable(
+        self,
+        request: IsochroneRequest,
+        raw: dict[str, Any],
+        request_id: str,
+        engine_version: str,
+        engine_ms: int,
+        denoise: float,
+        generalize: int,
+    ) -> tuple[dict[str, Any], float | None]:
         polygons, snapped = parse_isochrone_response(raw, request.contours)
         snap_distance = self._check_snap(request, snapped)
 
-        engine_version = await self.engine.version()
         features = self._build_features(request, polygons, request_id, engine_version)
         if not features:
             raise ProblemError(
@@ -185,15 +219,7 @@ class IsochroneService:
                 "engine_ms": engine_ms,
             },
         }
-
-        await self.cache.set(cache_key, stable)
-        payload = self._finalize(stable, request_id, started, cache_state="miss")
-        return IsochroneResult(
-            payload=payload,
-            cache_hit=False,
-            engine_ms=engine_ms,
-            snap_distance_m=snap_distance,
-        )
+        return stable, snap_distance
 
     def _check_snap(
         self, request: IsochroneRequest, snapped: tuple[float, float] | None

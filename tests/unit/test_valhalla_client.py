@@ -97,6 +97,45 @@ def test_parse_response_extracts_polygons_and_snapped_point():
     assert snapped == (43.231, 76.881)
 
 
+def test_parse_response_reads_a_snapped_multipoint():
+    payload = {
+        "features": [
+            {
+                "properties": {"contour": 10.0},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+                },
+            },
+            {
+                "properties": {"location_index": 0, "type": "snapped"},
+                "geometry": {"type": "MultiPoint", "coordinates": [[76.881, 43.231]]},
+            },
+            {
+                "properties": {"location_index": 0, "type": "input"},
+                "geometry": {"type": "Point", "coordinates": [76.88, 43.23]},
+            },
+        ]
+    }
+    polygons, snapped = parse_isochrone_response(payload, [10])
+    assert sorted(polygons) == [10]
+    assert snapped == (43.231, 76.881)
+
+
+def test_parse_response_survives_an_empty_snapped_multipoint():
+    payload = {
+        "features": [
+            {
+                "properties": {"type": "snapped"},
+                "geometry": {"type": "MultiPoint", "coordinates": []},
+            }
+        ]
+    }
+    polygons, snapped = parse_isochrone_response(payload, [10])
+    assert polygons == {}
+    assert snapped is None
+
+
 def test_parse_response_ignores_unknown_contours_and_geometries():
     payload = {
         "features": [
@@ -148,6 +187,39 @@ async def test_timeout_maps_to_engine_timeout(client):
             await client.isochrone({})
     assert info.value.code == "ENGINE_TIMEOUT"
     assert info.value.status == 504
+
+
+async def test_connect_timeout_is_retried_once_before_it_becomes_an_error(client):
+    with respx.mock:
+        route = respx.post(f"{BASE_URL}/isochrone").mock(
+            side_effect=[
+                httpx.ConnectTimeout("timed out"),
+                httpx.Response(200, json={"features": []}),
+            ]
+        )
+        payload, engine_ms = await client.isochrone({})
+    assert payload == {"features": []}
+    assert route.call_count == 2
+    assert engine_ms >= 0
+
+
+async def test_a_second_connect_timeout_is_not_retried_again(client):
+    with respx.mock:
+        route = respx.post(f"{BASE_URL}/isochrone").mock(
+            side_effect=[httpx.ConnectTimeout("timed out"), httpx.ConnectTimeout("timed out")]
+        )
+        with pytest.raises(ProblemError) as info:
+            await client.isochrone({})
+    assert info.value.code == "ENGINE_TIMEOUT"
+    assert route.call_count == 2
+
+
+async def test_a_read_timeout_is_never_retried(client):
+    with respx.mock:
+        route = respx.post(f"{BASE_URL}/isochrone").mock(side_effect=httpx.ReadTimeout("slow"))
+        with pytest.raises(ProblemError):
+            await client.isochrone({})
+    assert route.call_count == 1
 
 
 async def test_connection_error_maps_to_engine_unavailable(client):
@@ -218,6 +290,25 @@ class FlakyEngine:
         return {"version": "3.5.1"}
 
 
+async def test_warmup_opens_the_requested_number_of_connections():
+    engine = FlakyEngine()
+    established = await ValhallaClient.warmup(engine, 5)
+    assert established == 5
+    assert engine.calls == 5
+
+
+async def test_warmup_is_a_no_op_for_zero_connections():
+    engine = FlakyEngine()
+    assert await ValhallaClient.warmup(engine, 0) == 0
+    assert engine.calls == 0
+
+
+async def test_warmup_survives_an_engine_that_is_not_up_yet():
+    engine = FlakyEngine(ConnectionRefusedError("connection refused"))
+    assert await ValhallaClient.warmup(engine, 3) == 0
+    assert engine.calls == 3
+
+
 async def test_monitor_starts_in_preparing_until_the_engine_answers():
     engine = FlakyEngine(ConnectionRefusedError("connection refused"))
     monitor = EngineMonitor(engine, poll_interval_s=60)
@@ -233,7 +324,7 @@ async def test_monitor_starts_in_preparing_until_the_engine_answers():
 
 async def test_monitor_reports_a_failure_only_after_the_engine_was_ready():
     engine = FlakyEngine()
-    monitor = EngineMonitor(engine, poll_interval_s=60)
+    monitor = EngineMonitor(engine, poll_interval_s=60, failure_threshold=1)
 
     assert await monitor.refresh() is EngineState.ready
     assert monitor.ready is True
@@ -244,6 +335,35 @@ async def test_monitor_reports_a_failure_only_after_the_engine_was_ready():
     detail = monitor.unavailable_detail()
     assert "сборка тайлов" not in detail
     assert "ConnectionRefusedError" in monitor.error
+
+
+async def test_monitor_stays_ready_until_the_failure_threshold_is_reached():
+    engine = FlakyEngine()
+    monitor = EngineMonitor(engine, poll_interval_s=60, failure_threshold=3)
+
+    assert await monitor.refresh() is EngineState.ready
+
+    engine.error = ConnectionRefusedError("connection refused")
+    assert await monitor.refresh() is EngineState.ready
+    assert await monitor.refresh() is EngineState.ready
+    assert await monitor.refresh() is EngineState.unavailable
+
+
+async def test_monitor_resets_the_failure_counter_on_a_successful_poll():
+    engine = FlakyEngine()
+    monitor = EngineMonitor(engine, poll_interval_s=60, failure_threshold=2)
+
+    assert await monitor.refresh() is EngineState.ready
+
+    engine.error = ConnectionRefusedError("connection refused")
+    assert await monitor.refresh() is EngineState.ready
+
+    engine.error = None
+    assert await monitor.refresh() is EngineState.ready
+
+    engine.error = ConnectionRefusedError("connection refused")
+    assert await monitor.refresh() is EngineState.ready
+    assert await monitor.refresh() is EngineState.unavailable
 
 
 async def test_monitor_recovers_and_stops_its_background_task():

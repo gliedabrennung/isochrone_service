@@ -42,20 +42,25 @@ const ORIGINS = [
 
 const MODES = ["pedestrian", "pedestrian", "bicycle", "auto"];
 const CONTOUR_SETS = [[10, 20, 30], [15], [10, 20], [60], [5, 10, 15, 20]];
+const COORD_PRECISION = Number(__ENV.CACHE_COORD_PRECISION || 4);
+const OFFSET_STEPS = [0, 0.004, -0.004];
+
+const POINTS = ORIGINS.flatMap((origin) =>
+  OFFSET_STEPS.map((step) => ({
+    lat: Number((origin.lat + step).toFixed(COORD_PRECISION)),
+    lon: Number((origin.lon + step).toFixed(COORD_PRECISION))
+  }))
+);
 
 function pick(items) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
-function jitter(value) {
-  return Number((value + (Math.random() - 0.5) * 0.02).toFixed(6));
-}
-
 export default function () {
-  const origin = pick(ORIGINS);
+  const point = pick(POINTS);
   const body = JSON.stringify({
-    lat: jitter(origin.lat),
-    lon: jitter(origin.lon),
+    lat: point.lat,
+    lon: point.lon,
     contours: pick(CONTOUR_SETS),
     mode: pick(MODES),
     options: { rings: Math.random() < 0.25, exclude_water: true }

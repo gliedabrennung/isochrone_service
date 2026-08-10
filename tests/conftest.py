@@ -57,6 +57,7 @@ def api(_test_client) -> ApiHarness:
 
     monitor = app.state.engine_monitor
     monitor.client = engine
+    monitor.failure_threshold = 1
     asyncio.run(monitor.refresh())
 
     service = app.state.isochrone_service
