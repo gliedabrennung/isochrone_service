@@ -17,4 +17,5 @@ htmlcov/
 !tests/fixtures/**/*.geojson
 node_modules/
 load/results/
+.claude/
 .DS_Store
