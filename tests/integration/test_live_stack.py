@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 from pathlib import Path
 
 import httpx
@@ -192,6 +193,20 @@ def test_invalid_parameters(client, contours):
     response = isochrone(client, contours=contours)
     assert response.status_code == 400
     assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_web_config_renders_a_usable_basemap_template():
+    response = httpx.get(f"{BASE_URL}/config.js", timeout=10.0)
+    assert response.status_code == 200
+
+    match = re.search(r'basemapTileUrl:\s*"([^"]*)"', response.text)
+    assert match, response.text
+    url = match.group(1)
+
+    assert url.startswith("https://")
+    for placeholder in ("{z}", "{x}", "{y}"):
+        assert url.count(placeholder) == 1, url
+    assert url.count("{") == 3 and url.count("}") == 3, url
 
 
 def test_metrics_endpoint(client):
